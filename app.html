@@ -46,6 +46,7 @@ const APP = {
     voice: "coral",
     ttsInstructions: "", // optional
     scale: 1.5,
+    maxParallel: 10,
   },
   defaults: {
     prompt:
@@ -87,7 +88,6 @@ function downloadBlob(blob, filename) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 
 // --------- External libs sync check (for file:// + CDN UMD scripts) ---------
@@ -108,6 +108,7 @@ function ensureLibsSync() {
 
 // --------- Persistence ---------
 const LS_KEY = "pdf2aac_app_v1";
+const TEMP_SUPPORT_KEY_PREFIX = "temp_supported::";
 function loadPersisted() {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -120,6 +121,9 @@ function loadPersisted() {
     if (typeof obj.voice === "string") APP.state.voice = obj.voice;
     if (typeof obj.ttsInstructions === "string") APP.state.ttsInstructions = obj.ttsInstructions;
     if (typeof obj.scale === "number") APP.state.scale = obj.scale;
+    if (typeof obj.maxParallel === "number" && Number.isFinite(obj.maxParallel)) {
+      APP.state.maxParallel = Math.max(1, Math.floor(obj.maxParallel));
+    }
   } catch {}
 }
 function persist() {
@@ -131,8 +135,24 @@ function persist() {
     voice: APP.state.voice,
     ttsInstructions: APP.state.ttsInstructions,
     scale: APP.state.scale,
+    maxParallel: APP.state.maxParallel,
   };
   try { localStorage.setItem(LS_KEY, JSON.stringify(obj)); } catch {}
+}
+
+function getTempSupport(modelId) {
+  if (!modelId) return null;
+  try {
+    const raw = localStorage.getItem(TEMP_SUPPORT_KEY_PREFIX + modelId);
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+  } catch {}
+  return null;
+}
+
+function setTempSupport(modelId, supported) {
+  if (!modelId || typeof supported !== "boolean") return;
+  try { localStorage.setItem(TEMP_SUPPORT_KEY_PREFIX + modelId, String(supported)); } catch {}
 }
 
 // --------- External libs (CDN dynamic import) ---------
@@ -172,47 +192,69 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
     required: ["file"]
   };
 
-  const body = {
-    model: APP.state.visionModel,
-    input: [
-      {
-        role: "system",
-        content:
-          "You are transcribing a document page image. You may conceptually clean/normalize the image to read it better, " +
-          "but do not use OCR/text-extraction tools. Follow the user's instructions exactly and return JSON."
-      },
-      {
-        role: "user",
-        content: [
-          { type: "input_text", text: APP.state.prompt },
-          { type: "input_image", image_url: dataUrl }
-        ]
+  const modelId = APP.state.visionModel;
+  const cachedTempSupport = getTempSupport(modelId);
+  let includeTemperature = cachedTempSupport !== false;
+
+  const makeBody = (withTemperature) => {
+    const body = {
+      model: modelId,
+      input: [
+        {
+          role: "system",
+          content:
+            "You are transcribing a document page image. You may conceptually clean/normalize the image to read it better, " +
+            "but do not use OCR/text-extraction tools. Follow the user's instructions exactly and return JSON."
+        },
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: APP.state.prompt },
+            { type: "input_image", image_url: dataUrl }
+          ]
+        }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          strict: true,
+          name: "page_text",
+          schema
+        }
       }
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        strict: true,
-        name: "page_text",
-        schema
-      }
-    },
-    temperature: 0
+    };
+    if (withTemperature) body.temperature = 0;
+    return body;
   };
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
+  const sendVision = (withTemperature) => fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${APP.state.apiKey}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(makeBody(withTemperature)),
     signal: abortSignal
   });
 
+  let res = await sendVision(includeTemperature);
   if (!res.ok) {
     const t = await safeReadText(res);
-    throw new Error(`Vision failed: HTTP ${res.status} ${t}`);
+    if (includeTemperature && isTemperatureUnsupportedError(res.status, t)) {
+      setTempSupport(modelId, false);
+      includeTemperature = false;
+      res = await sendVision(false);
+      if (!res.ok) {
+        const t2 = await safeReadText(res);
+        throw new Error(`Vision failed: HTTP ${res.status} ${t2}`);
+      }
+    } else {
+      throw new Error(`Vision failed: HTTP ${res.status} ${t}`);
+    }
+  }
+
+  if (includeTemperature && cachedTempSupport !== true) {
+    setTempSupport(modelId, true);
   }
 
   const json = await res.json();
@@ -290,6 +332,17 @@ function extractOutputText(respJson) {
 
 async function safeReadText(res) {
   try { return (await res.text()).slice(0, 1000); } catch { return ""; }
+}
+
+function isTemperatureUnsupportedError(status, msg) {
+  if (status !== 400 || !msg) return false;
+  const s = String(msg).toLowerCase();
+  if (!s.includes("temperature")) return false;
+  return (
+    s.includes("not supported") ||
+    s.includes("unsupported") ||
+    s.includes("unknown")
+  );
 }
 
 // --------- Blob helpers ---------
@@ -390,6 +443,63 @@ function makeAbort() {
   return ac;
 }
 
+async function processPage(pdfDoc, i, ui) {
+  const p = APP.state.pages[i - 1];
+
+  try {
+    // Render
+    p.stage = "rendering";
+    p.err = null;
+    ui.updatePage(p);
+
+    const acRender = makeAbort();
+    p.aborts.push(acRender);
+    // Render isn't fetch-based; cancellation is checked between stages.
+    const png = await renderPageToPngBlob(pdfDoc, i, APP.state.scale);
+    if (APP.state.cancelled) throw new Error("Cancelled");
+
+    // Vision
+    p.stage = "vision";
+    ui.updatePage(p);
+    const acVision = makeAbort();
+    p.aborts.push(acVision);
+    const txt = await openaiVisionImageToText({ pngBlob: png, abortSignal: acVision.signal });
+
+    p.txt = txt;
+    p.stage = "text_ready";
+    ui.updatePage(p);
+    ui.enableTxtDownload(p);
+    ui.updateGlobalButtons();
+
+    if (APP.state.cancelled) throw new Error("Cancelled");
+
+    // TTS
+    p.stage = "tts";
+    ui.updatePage(p);
+    const acTts = makeAbort();
+    p.aborts.push(acTts);
+    const aacBytes = await openaiTtsTextToAac({ text: txt, abortSignal: acTts.signal });
+
+    p.aacBytes = aacBytes;
+    p.stage = "ready";
+    ui.updatePage(p);
+    ui.enableAacDownload(p);
+    ui.updateGlobalButtons();
+  } catch (e) {
+    if (APP.state.cancelled || String(e && e.message || e).toLowerCase().includes("cancel")) {
+      p.stage = "cancelled";
+    } else {
+      p.stage = "failed";
+      p.err = String(e && e.message || e);
+    }
+    ui.updatePage(p);
+    ui.updateGlobalButtons();
+  } finally {
+    // Small breather to keep UI responsive on mobile
+    await sleep(50);
+  }
+}
+
 async function runPipeline(ui) {
   await ensureLibs();
   APP.state.cancelled = false;
@@ -419,67 +529,24 @@ async function runPipeline(ui) {
     }
     ui.updateGlobalButtons();
 
-    // Sequential processing (mobile-safe)
-    for (let i = 1; i <= APP.state.pageCount; i++) {
-      if (APP.state.cancelled) break;
-      const p = APP.state.pages[i - 1];
+    const requestedParallel = Math.max(1, Math.floor(Number(APP.state.maxParallel) || 1));
+    const workerCount = Math.min(requestedParallel, APP.state.pageCount);
+    ui.setStatus(`Processing ${APP.state.pageCount} pages (max parallel: ${workerCount})…`);
 
-      try {
-        // Render
-        p.stage = "rendering";
-        p.err = null;
-        ui.updatePage(p);
-
-        const acRender = makeAbort();
-        p.aborts.push(acRender);
-        // render isn't fetch-based; we'll just honor cancellation flag
-        const png = await renderPageToPngBlob(pdfDoc, i, APP.state.scale);
-        if (APP.state.cancelled) throw new Error("Cancelled");
-
-        // Vision
-        p.stage = "vision";
-        ui.updatePage(p);
-        const acVision = makeAbort();
-        p.aborts.push(acVision);
-        const txt = await openaiVisionImageToText({ pngBlob: png, abortSignal: acVision.signal });
-
-        p.txt = txt;
-        p.stage = "text_ready";
-        ui.updatePage(p);
-        ui.enableTxtDownload(p);
-        ui.updateGlobalButtons();
-
-        if (APP.state.cancelled) throw new Error("Cancelled");
-
-        // TTS
-        p.stage = "tts";
-        ui.updatePage(p);
-        const acTts = makeAbort();
-        p.aborts.push(acTts);
-        const aacBytes = await openaiTtsTextToAac({ text: txt, abortSignal: acTts.signal });
-
-        p.aacBytes = aacBytes;
-        p.stage = "ready";
-        ui.updatePage(p);
-        ui.enableAacDownload(p);
-        ui.updateGlobalButtons();
-
-      } catch (e) {
-        if (String(e && e.message || e).toLowerCase().includes("cancel")) {
-          p.stage = "cancelled";
-        } else {
-          p.stage = "failed";
-          p.err = String(e && e.message || e);
-        }
-        ui.updatePage(p);
-        ui.updateGlobalButtons();
-      } finally {
-        // Abort controllers cleanup not needed; keep for cancel button
+    let nextPage = 1;
+    const worker = async () => {
+      while (true) {
+        if (APP.state.cancelled) return;
+        const pageNum = nextPage;
+        nextPage += 1;
+        if (pageNum > APP.state.pageCount) return;
+        await processPage(pdfDoc, pageNum, ui);
       }
+    };
 
-      // small breather to keep UI responsive on mobile
-      await sleep(50);
-    }
+    const workers = [];
+    for (let w = 0; w < workerCount; w++) workers.push(worker());
+    await Promise.all(workers);
 
     ui.setStatus(APP.state.cancelled ? "Cancelled." : "Done.");
   } catch (e) {
@@ -590,6 +657,19 @@ function buildUI() {
     }
   });
 
+  const parallelInput = el("input", {
+    type: "number",
+    step: "1",
+    min: "1",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => {
+      const v = Number(e.target.value);
+      if (!Number.isFinite(v)) return;
+      APP.state.maxParallel = Math.max(1, Math.floor(v));
+      persist();
+    }
+  });
+
   const startBtn = el("button", { style: btnStyle(), onclick: async () => {
     if (APP.state.running) return;
     await runPipeline(ui);
@@ -641,6 +721,7 @@ function buildUI() {
       voiceInput.disabled = running;
       ttsInstr.disabled = running;
       scaleInput.disabled = running;
+      parallelInput.disabled = running;
     },
     clearPages: () => { tbody.innerHTML = ""; },
     addPageRow: (p) => {
@@ -709,9 +790,10 @@ function buildUI() {
     el("div", {}, el("div", { style: labelStyle() }, "1) OpenAI API key"), keyInput),
     el("div", {}, el("div", { style: labelStyle() }, "2) Upload PDF"), pdfInput),
     el("div", {}, el("div", { style: labelStyle() }, "3) Prompt (PNG → text)"), promptArea, el("div", { style: { marginTop: "8px" } }, resetPromptBtn)),
-    el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
+    el("div", { style: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"10px" } },
       el("div", {}, el("div", { style: labelStyle() }, "Vision model"), visionModelInput),
       el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
+      el("div", {}, el("div", { style: labelStyle() }, "Max parallel pages"), parallelInput),
     ),
     el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
       el("div", {}, el("div", { style: labelStyle() }, "TTS model"), ttsModelInput),
@@ -736,6 +818,7 @@ function buildUI() {
   voiceInput.value = APP.state.voice;
   ttsInstr.value = APP.state.ttsInstructions;
   scaleInput.value = String(APP.state.scale);
+  parallelInput.value = String(APP.state.maxParallel);
 
   ui.setRunning(false);
   ui.updateGlobalButtons();
