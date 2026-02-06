@@ -10,12 +10,11 @@
 <div id="app"></div>
 
 <!-- Libraries (UMD) so file:// works better -->
-<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <script>
-  // PDF.js worker
   if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
     window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js";
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
   }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -88,6 +87,24 @@ function downloadBlob(blob, filename) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+
+// --------- External libs sync check (for file:// + CDN UMD scripts) ---------
+function ensureLibsSync() {
+  // Prefer globals provided by <script> tags in app.html
+  if (window.pdfjsLib) pdfjsLib = window.pdfjsLib;
+  if (window.JSZip) JSZip = window.JSZip;
+
+  if (!pdfjsLib) throw new Error("pdfjsLib not loaded. Check PDF.js <script> tag.");
+  if (!JSZip) throw new Error("JSZip not loaded. Check JSZip <script> tag.");
+
+  // Worker (PDF.js)
+  if (pdfjsLib.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+  }
+}
 
 // --------- Persistence ---------
 const LS_KEY = "pdf2aac_app_v1";
@@ -308,7 +325,7 @@ async function renderPageToPngBlob(pdfDoc, pageNumber, scale) {
 
 // --------- ZIP + concat ---------
 async function zipAllTxt() {
-  ensureLibsSync();
+  await ensureLibs();
   const zip = new JSZip();
   for (const p of APP.state.pages) {
     if (typeof p.txt === "string") {
@@ -321,7 +338,7 @@ async function zipAllTxt() {
 }
 
 async function zipAllAac() {
-  ensureLibsSync();
+  await ensureLibs();
   const zip = new JSZip();
   for (const p of APP.state.pages) {
     if (p.aacBytes instanceof Uint8Array) {
@@ -374,7 +391,7 @@ function makeAbort() {
 }
 
 async function runPipeline(ui) {
-  ensureLibsSync();
+  await ensureLibs();
   APP.state.cancelled = false;
   APP.state.running = true;
   ui.setRunning(true);
