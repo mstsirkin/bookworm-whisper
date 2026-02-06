@@ -124,7 +124,7 @@ function loadPersisted() {
     if (typeof obj.ttsInstructions === "string") APP.state.ttsInstructions = obj.ttsInstructions;
     if (typeof obj.scale === "number") APP.state.scale = obj.scale;
     if (typeof obj.maxParallel === "number" && Number.isFinite(obj.maxParallel)) {
-      APP.state.maxParallel = Math.max(1, Math.floor(obj.maxParallel));
+      APP.state.maxParallel = Math.max(0, Math.floor(obj.maxParallel));
     }
   } catch {}
 }
@@ -779,9 +779,16 @@ async function runPipeline(ui) {
     }
     ui.updateGlobalButtons();
 
-    const requestedParallel = Math.max(1, Math.floor(Number(APP.state.maxParallel) || 1));
+    const parsedParallel = Number(APP.state.maxParallel);
+    const requestedParallel = Number.isFinite(parsedParallel)
+      ? Math.max(0, Math.floor(parsedParallel))
+      : 0;
     const workerCount = Math.min(requestedParallel, APP.state.pageCount);
-    ui.setStatus(`Processing ${APP.state.pageCount} pages (max parallel: ${workerCount})…`);
+    if (workerCount === 0) {
+      ui.setStatus(`Queued ${APP.state.pageCount} pages. Manual mode: use Restart Page to start jobs.`);
+    } else {
+      ui.setStatus(`Processing ${APP.state.pageCount} pages (max parallel: ${workerCount})…`);
+    }
 
     const scheduler = createPageScheduler({ pdfDoc, ui, maxParallel: workerCount });
     APP.state.scheduler = scheduler;
@@ -910,12 +917,12 @@ function buildUI() {
   const parallelInput = el("input", {
     type: "number",
     step: "1",
-    min: "1",
+    min: "0",
     style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => {
       const v = Number(e.target.value);
       if (!Number.isFinite(v)) return;
-      APP.state.maxParallel = Math.max(1, Math.floor(v));
+      APP.state.maxParallel = Math.max(0, Math.floor(v));
       persist();
     }
   });
@@ -1054,7 +1061,7 @@ function buildUI() {
     el("div", { style: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"10px" } },
       el("div", {}, el("div", { style: labelStyle() }, "Vision model"), visionModelInput),
       el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
-      el("div", {}, el("div", { style: labelStyle() }, "Max parallel pages"), parallelInput),
+      el("div", {}, el("div", { style: labelStyle() }, "Max parallel pages (0 to start jobs manually)"), parallelInput),
     ),
     el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
       el("div", {}, el("div", { style: labelStyle() }, "TTS model"), ttsModelInput),
