@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF → PNG → Text → AAC</title>
+</head>
+<body>
+
+<div id="app"></div>
+
+<!-- Libraries (UMD) so file:// works better -->
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js"></script>
+<script>
+  // PDF.js worker
+  if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js";
+  }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+<script>
+/*
+Single-file JS app (no build step).
+Usage: include in an HTML page as:
+  <script type="module" src="app.js"><\/script>
+
+This script builds the UI and runs:
+PDF -> PNG (PDF.js) -> text (OpenAI Responses) -> AAC (OpenAI TTS) -> per-page downloads + ZIPs.
+*/
+
+const APP = {
+  state: {
+    running: false,
+    cancelled: false,
+    pdfFile: null,
+    pdfBytes: null,
+    pageCount: 0,
+    pages: [], // {i, stage, txt, aacBytes(Uint8Array), err, aborts:[]}
+    // persisted
+    apiKey: "",
+    prompt: "",
+    // settings
+    visionModel: "gpt-4o-mini",
+    ttsModel: "gpt-4o-mini-tts",
+    voice: "coral",
+    ttsInstructions: "", // optional
+    scale: 1.5,
+  },
+  defaults: {
+    prompt:
+`look at it, remove page headers and footers, and produce the text of the page.
+if there is a footnote, find where it belongs and insert inline like this:
+FOOTNOTE: [ TEXT ] END OF FOOTNOTE .
+Do not use OCR do it manually!
+return the result in field "file" in json.`
+  }
+};
+
+// --------- Minimal DOM helpers ---------
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v;
+    else if (k === "style") Object.assign(node.style, v);
+    else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null) node.setAttribute(k, String(v));
+  }
+  for (const c of children) {
+    if (c === null || c === undefined) continue;
+    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return node;
+}
+
+function setText(node, text) {
+  node.textContent = text;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// --------- Persistence ---------
+const LS_KEY = "pdf2aac_app_v1";
+function loadPersisted() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (typeof obj.apiKey === "string") APP.state.apiKey = obj.apiKey;
+    if (typeof obj.prompt === "string") APP.state.prompt = obj.prompt;
+    if (typeof obj.visionModel === "string") APP.state.visionModel = obj.visionModel;
+    if (typeof obj.ttsModel === "string") APP.state.ttsModel = obj.ttsModel;
+    if (typeof obj.voice === "string") APP.state.voice = obj.voice;
+    if (typeof obj.ttsInstructions === "string") APP.state.ttsInstructions = obj.ttsInstructions;
+    if (typeof obj.scale === "number") APP.state.scale = obj.scale;
+  } catch {}
+}
+function persist() {
+  const obj = {
+    apiKey: APP.state.apiKey,
+    prompt: APP.state.prompt,
+    visionModel: APP.state.visionModel,
+    ttsModel: APP.state.ttsModel,
+    voice: APP.state.voice,
+    ttsInstructions: APP.state.ttsInstructions,
+    scale: APP.state.scale,
+  };
+  try { localStorage.setItem(LS_KEY, JSON.stringify(obj)); } catch {}
+}
+
+// --------- External libs (CDN dynamic import) ---------
+let pdfjsLib = null;
+let JSZip = null;
+
+async function ensureLibs() {
+  if (!pdfjsLib) {
+    // pdfjs-dist ESM build
+    const mod = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.mjs");
+    pdfjsLib = mod;
+    // Worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.mjs";
+  }
+  if (!JSZip) {
+    const mod = await import("https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm");
+    JSZip = mod.default;
+  }
+}
+
+// --------- OpenAI calls ---------
+function mustHaveKey() {
+  if (!APP.state.apiKey || !APP.state.apiKey.trim()) {
+    throw new Error("Missing OpenAI API key.");
+  }
+}
+
+async function openaiVisionImageToText({ pngBlob, abortSignal }) {
+  mustHaveKey();
+
+  const dataUrl = await blobToDataURL(pngBlob); // "data:image/png;base64,..."
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: { file: { type: "string" } },
+    required: ["file"]
+  };
+
+  const body = {
+    model: APP.state.visionModel,
+    input: [
+      {
+        role: "system",
+        content:
+          "You are transcribing a document page image. You may conceptually clean/normalize the image to read it better, " +
+          "but do not use OCR/text-extraction tools. Follow the user's instructions exactly and return JSON."
+      },
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: APP.state.prompt },
+          { type: "input_image", image_url: dataUrl }
+        ]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        strict: true,
+        name: "page_text",
+        schema
+      }
+    },
+    temperature: 0
+  };
+
+  const res = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${APP.state.apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body),
+    signal: abortSignal
+  });
+
+  if (!res.ok) {
+    const t = await safeReadText(res);
+    throw new Error(`Vision failed: HTTP ${res.status} ${t}`);
+  }
+
+  const json = await res.json();
+  // The Responses API can return structured parsed output, but when calling REST directly,
+  // easiest is to pull text from output_text then JSON.parse it if needed.
+  // We'll try "output_parsed" (SDK-style) if present, else parse from "output_text".
+  if (json.output_parsed && typeof json.output_parsed.file === "string") {
+    return json.output_parsed.file;
+  }
+
+  const outText = extractOutputText(json);
+  if (!outText) throw new Error("Vision failed: empty response text.");
+  let parsed;
+  try { parsed = JSON.parse(outText); } catch (e) {
+    throw new Error("Vision failed: response was not valid JSON.");
+  }
+  if (!parsed || typeof parsed.file !== "string") throw new Error("Vision failed: JSON missing 'file'.");
+  return parsed.file;
+}
+
+async function openaiTtsTextToAac({ text, abortSignal }) {
+  mustHaveKey();
+
+  const body = {
+    model: APP.state.ttsModel,
+    voice: APP.state.voice,
+    input: text,
+    response_format: "aac",
+  };
+  if (APP.state.ttsInstructions && APP.state.ttsInstructions.trim()) {
+    body.instructions = APP.state.ttsInstructions.trim();
+  }
+
+  const res = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${APP.state.apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body),
+    signal: abortSignal
+  });
+
+  if (!res.ok) {
+    const t = await safeReadText(res);
+    throw new Error(`TTS failed: HTTP ${res.status} ${t}`);
+  }
+
+  const buf = await res.arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+// --------- Responses JSON helpers ---------
+function extractOutputText(respJson) {
+  // Typical structure: resp.output is array of items, each with content parts.
+  // We'll walk it and concatenate any output_text parts.
+  try {
+    const out = respJson.output;
+    if (!Array.isArray(out)) return "";
+    let acc = "";
+    for (const item of out) {
+      const content = item && item.content;
+      if (!Array.isArray(content)) continue;
+      for (const part of content) {
+        if (part && part.type === "output_text" && typeof part.text === "string") {
+          acc += part.text;
+        }
+      }
+    }
+    return acc.trim();
+  } catch {
+    return "";
+  }
+}
+
+async function safeReadText(res) {
+  try { return (await res.text()).slice(0, 1000); } catch { return ""; }
+}
+
+// --------- Blob helpers ---------
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(new Error("Failed to read blob."));
+    r.onload = () => resolve(String(r.result));
+    r.readAsDataURL(blob);
+  });
+}
+
+// --------- PDF rendering ---------
+async function renderPageToPngBlob(pdfDoc, pageNumber, scale) {
+  const page = await pdfDoc.getPage(pageNumber);
+  const viewport = page.getViewport({ scale });
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  // Cleanup
+  page.cleanup?.();
+  canvas.width = 0; canvas.height = 0;
+
+  if (!pngBlob) throw new Error("Failed to create PNG blob.");
+  return pngBlob;
+}
+
+// --------- ZIP + concat ---------
+async function zipAllTxt() {
+  ensureLibsSync();
+  const zip = new JSZip();
+  for (const p of APP.state.pages) {
+    if (typeof p.txt === "string") {
+      zip.file(`text/page_${String(p.i).padStart(3, "0")}.txt`, p.txt);
+    }
+  }
+  zip.file("manifest.json", JSON.stringify(makeManifest(), null, 2));
+  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 }});
+  downloadBlob(blob, "text_pages.zip");
+}
+
+async function zipAllAac() {
+  ensureLibsSync();
+  const zip = new JSZip();
+  for (const p of APP.state.pages) {
+    if (p.aacBytes instanceof Uint8Array) {
+      zip.file(`audio/page_${String(p.i).padStart(3, "0")}.aac`, p.aacBytes);
+    }
+  }
+  zip.file("manifest.json", JSON.stringify(makeManifest(), null, 2));
+  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 }});
+  downloadBlob(blob, "aac_pages.zip");
+}
+
+function concatAllAac() {
+  const chunks = APP.state.pages
+    .filter(p => p.aacBytes instanceof Uint8Array)
+    .sort((a,b) => a.i - b.i)
+    .map(p => p.aacBytes);
+
+  if (!chunks.length) throw new Error("No AAC pages available.");
+
+  let total = 0;
+  for (const c of chunks) total += c.byteLength;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  const blob = new Blob([out], { type: "audio/aac" });
+  downloadBlob(blob, "full.aac");
+}
+
+function makeManifest() {
+  return {
+    source_pdf: APP.state.pdfFile ? APP.state.pdfFile.name : "",
+    pages: APP.state.pages.map(p => ({
+      page: p.i,
+      text: p.txt ? `text/page_${String(p.i).padStart(3,"0")}.txt` : null,
+      audio: p.aacBytes ? `audio/page_${String(p.i).padStart(3,"0")}.aac` : null,
+      status: p.stage,
+      error: p.err || null
+    })),
+    created_at: new Date().toISOString()
+  };
+}
+
+// --------- Pipeline orchestration ---------
+function makeAbort() {
+  const ac = new AbortController();
+  return ac;
+}
+
+async function runPipeline(ui) {
+  ensureLibsSync();
+  APP.state.cancelled = false;
+  APP.state.running = true;
+  ui.setRunning(true);
+
+  try {
+    if (!APP.state.pdfFile) throw new Error("Please upload a PDF.");
+    if (!APP.state.apiKey) throw new Error("Please enter an OpenAI API key.");
+
+    // Read PDF bytes
+    ui.setStatus("Reading PDF…");
+    APP.state.pdfBytes = await APP.state.pdfFile.arrayBuffer();
+
+    ui.setStatus("Loading PDF…");
+    const loadingTask = pdfjsLib.getDocument({ data: APP.state.pdfBytes });
+    const pdfDoc = await loadingTask.promise;
+    APP.state.pageCount = pdfDoc.numPages;
+
+    // Create slots
+    APP.state.pages = [];
+    ui.clearPages();
+    for (let i = 1; i <= APP.state.pageCount; i++) {
+      const p = { i, stage: "queued", txt: null, aacBytes: null, err: null, aborts: [] };
+      APP.state.pages.push(p);
+      ui.addPageRow(p);
+    }
+    ui.updateGlobalButtons();
+
+    // Sequential processing (mobile-safe)
+    for (let i = 1; i <= APP.state.pageCount; i++) {
+      if (APP.state.cancelled) break;
+      const p = APP.state.pages[i - 1];
+
+      try {
+        // Render
+        p.stage = "rendering";
+        p.err = null;
+        ui.updatePage(p);
+
+        const acRender = makeAbort();
+        p.aborts.push(acRender);
+        // render isn't fetch-based; we'll just honor cancellation flag
+        const png = await renderPageToPngBlob(pdfDoc, i, APP.state.scale);
+        if (APP.state.cancelled) throw new Error("Cancelled");
+
+        // Vision
+        p.stage = "vision";
+        ui.updatePage(p);
+        const acVision = makeAbort();
+        p.aborts.push(acVision);
+        const txt = await openaiVisionImageToText({ pngBlob: png, abortSignal: acVision.signal });
+
+        p.txt = txt;
+        p.stage = "text_ready";
+        ui.updatePage(p);
+        ui.enableTxtDownload(p);
+        ui.updateGlobalButtons();
+
+        if (APP.state.cancelled) throw new Error("Cancelled");
+
+        // TTS
+        p.stage = "tts";
+        ui.updatePage(p);
+        const acTts = makeAbort();
+        p.aborts.push(acTts);
+        const aacBytes = await openaiTtsTextToAac({ text: txt, abortSignal: acTts.signal });
+
+        p.aacBytes = aacBytes;
+        p.stage = "ready";
+        ui.updatePage(p);
+        ui.enableAacDownload(p);
+        ui.updateGlobalButtons();
+
+      } catch (e) {
+        if (String(e && e.message || e).toLowerCase().includes("cancel")) {
+          p.stage = "cancelled";
+        } else {
+          p.stage = "failed";
+          p.err = String(e && e.message || e);
+        }
+        ui.updatePage(p);
+        ui.updateGlobalButtons();
+      } finally {
+        // Abort controllers cleanup not needed; keep for cancel button
+      }
+
+      // small breather to keep UI responsive on mobile
+      await sleep(50);
+    }
+
+    ui.setStatus(APP.state.cancelled ? "Cancelled." : "Done.");
+  } catch (e) {
+    ui.setStatus(`Error: ${String(e && e.message || e)}`);
+  } finally {
+    APP.state.running = false;
+    ui.setRunning(false);
+    ui.updateGlobalButtons();
+  }
+}
+
+function cancelPipeline(ui) {
+  APP.state.cancelled = true;
+  for (const p of APP.state.pages) {
+    for (const ac of p.aborts) {
+      try { ac.abort(); } catch {}
+    }
+  }
+  ui.setStatus("Cancelling…");
+  ui.setRunning(false);
+  ui.updateGlobalButtons();
+}
+
+// --------- UI ---------
+function buildUI() {
+  const root = el("div", { style: {
+    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    maxWidth: "980px",
+    margin: "0 auto",
+    padding: "16px",
+    lineHeight: "1.35"
+  }});
+
+  const title = el("h2", {}, "PDF → PNG → Text → AAC (OpenAI)");
+
+  const status = el("div", { style: { margin: "8px 0", padding: "8px 10px", background: "#f5f5f5", borderRadius: "8px" }}, "Idle.");
+
+  const keyInput = el("input", {
+    type: "password",
+    placeholder: "OpenAI API key",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => { APP.state.apiKey = e.target.value; persist(); }
+  });
+
+  const promptArea = el("textarea", {
+    rows: "8",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
+    oninput: (e) => { APP.state.prompt = e.target.value; persist(); }
+  });
+
+  const resetPromptBtn = el("button", {
+    style: btnStyle(),
+    onclick: () => {
+      APP.state.prompt = APP.defaults.prompt;
+      promptArea.value = APP.state.prompt;
+      persist();
+    }
+  }, "Reset prompt to default");
+
+  const pdfInput = el("input", {
+    type: "file",
+    accept: "application/pdf",
+    style: { width: "100%" },
+    onchange: (e) => {
+      const f = e.target.files && e.target.files[0];
+      APP.state.pdfFile = f || null;
+      ui.setStatus(f ? `Selected PDF: ${f.name}` : "No PDF selected.");
+    }
+  });
+
+  const visionModelInput = el("input", {
+    type: "text",
+    placeholder: "Vision model (e.g. gpt-4o-mini)",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => { APP.state.visionModel = e.target.value; persist(); }
+  });
+
+  const ttsModelInput = el("input", {
+    type: "text",
+    placeholder: "TTS model (e.g. gpt-4o-mini-tts)",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => { APP.state.ttsModel = e.target.value; persist(); }
+  });
+
+  const voiceInput = el("input", {
+    type: "text",
+    placeholder: "Voice (e.g. coral)",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => { APP.state.voice = e.target.value; persist(); }
+  });
+
+  const ttsInstr = el("input", {
+    type: "text",
+    placeholder: "Optional TTS instructions",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => { APP.state.ttsInstructions = e.target.value; persist(); }
+  });
+
+  const scaleInput = el("input", {
+    type: "number",
+    step: "0.1",
+    min: "0.5",
+    max: "3.0",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => {
+      const v = Number(e.target.value);
+      if (!Number.isNaN(v)) { APP.state.scale = v; persist(); }
+    }
+  });
+
+  const startBtn = el("button", { style: btnStyle(), onclick: async () => {
+    if (APP.state.running) return;
+    await runPipeline(ui);
+  }}, "Start processing");
+
+  const cancelBtn = el("button", { style: btnStyle({ background:"#eee" }), onclick: () => {
+    if (!APP.state.running) return;
+    cancelPipeline(ui);
+  }}, "Cancel");
+
+  const zipTxtBtn = el("button", { style: btnStyle(), disabled: true, onclick: async () => {
+    await zipAllTxt();
+  }}, "Download all TXT (ZIP)");
+
+  const zipAacBtn = el("button", { style: btnStyle(), disabled: true, onclick: async () => {
+    await zipAllAac();
+  }}, "Download all AAC (ZIP)");
+
+  const fullAacBtn = el("button", { style: btnStyle(), disabled: true, onclick: () => {
+    concatAllAac();
+  }}, "Download full concatenated AAC");
+
+  const pageTable = el("table", { style: { width: "100%", borderCollapse: "collapse", marginTop: "12px" } });
+  const thead = el("thead", {}, el("tr", {},
+    th("Page"), th("Stage"), th("Text"), th("Audio"), th("Error")
+  ));
+  const tbody = el("tbody");
+  pageTable.appendChild(thead);
+  pageTable.appendChild(tbody);
+
+  function th(txt) {
+    return el("th", { style: { textAlign: "left", padding: "8px", borderBottom: "1px solid #ddd" } }, txt);
+  }
+  function tdNode(node) {
+    return el("td", { style: { padding: "8px", borderBottom: "1px solid #f0f0f0", verticalAlign: "top" } }, node);
+  }
+
+  const ui = {
+    setStatus: (t) => setText(status, t),
+    setRunning: (running) => {
+      startBtn.disabled = running;
+      cancelBtn.disabled = !running;
+      keyInput.disabled = running;
+      promptArea.disabled = running;
+      resetPromptBtn.disabled = running;
+      pdfInput.disabled = running;
+      visionModelInput.disabled = running;
+      ttsModelInput.disabled = running;
+      voiceInput.disabled = running;
+      ttsInstr.disabled = running;
+      scaleInput.disabled = running;
+    },
+    clearPages: () => { tbody.innerHTML = ""; },
+    addPageRow: (p) => {
+      const txtBtn = el("button", { style: miniBtnStyle(), disabled: true }, "Download TXT");
+      const aacBtn = el("button", { style: miniBtnStyle(), disabled: true }, "Download AAC");
+
+      txtBtn.addEventListener("click", () => {
+        if (typeof p.txt === "string") {
+          downloadBlob(new Blob([p.txt], { type: "text/plain;charset=utf-8" }), `page_${String(p.i).padStart(3,"0")}.txt`);
+        }
+      });
+      aacBtn.addEventListener("click", () => {
+        if (p.aacBytes instanceof Uint8Array) {
+          downloadBlob(new Blob([p.aacBytes], { type: "audio/aac" }), `page_${String(p.i).padStart(3,"0")}.aac`);
+        }
+      });
+
+      const stageSpan = el("span", {}, p.stage);
+      const errSpan = el("div", { style: { color: "#b00020", whiteSpace: "pre-wrap" } }, "");
+
+      const row = el("tr", {},
+        tdNode(el("span", {}, String(p.i))),
+        tdNode(stageSpan),
+        tdNode(txtBtn),
+        tdNode(aacBtn),
+        tdNode(errSpan)
+      );
+
+      p._ui = { row, stageSpan, txtBtn, aacBtn, errSpan };
+      tbody.appendChild(row);
+    },
+    updatePage: (p) => {
+      if (!p._ui) return;
+      setText(p._ui.stageSpan, p.stage);
+      setText(p._ui.errSpan, p.err ? p.err : "");
+      if (p.stage === "failed") {
+        p._ui.row.style.background = "#fff5f5";
+      } else if (p.stage === "ready") {
+        p._ui.row.style.background = "#f3fff3";
+      } else if (p.stage === "cancelled") {
+        p._ui.row.style.background = "#f7f7f7";
+      } else {
+        p._ui.row.style.background = "";
+      }
+    },
+    enableTxtDownload: (p) => { if (p._ui) p._ui.txtBtn.disabled = !(typeof p.txt === "string"); },
+    enableAacDownload: (p) => { if (p._ui) p._ui.aacBtn.disabled = !(p.aacBytes instanceof Uint8Array); },
+    updateGlobalButtons: () => {
+      const allTxtReady = APP.state.pages.length > 0 && APP.state.pages.every(p => typeof p.txt === "string" || p.stage === "cancelled" || p.stage === "failed");
+      const allAacReady = APP.state.pages.length > 0 && APP.state.pages.every(p => (p.aacBytes instanceof Uint8Array) || p.stage === "cancelled" || p.stage === "failed");
+
+      // Enable ZIP only when all relevant outputs exist (ignoring failed/cancelled pages)
+      const anyTxt = APP.state.pages.some(p => typeof p.txt === "string");
+      const anyAac = APP.state.pages.some(p => p.aacBytes instanceof Uint8Array);
+
+      zipTxtBtn.disabled = !(allTxtReady && anyTxt && !APP.state.running);
+      zipAacBtn.disabled = !(allAacReady && anyAac && !APP.state.running);
+      fullAacBtn.disabled = !(allAacReady && anyAac && !APP.state.running);
+    }
+  };
+
+  // Layout
+  const grid = el("div", { style: { display: "grid", gridTemplateColumns: "1fr", gap: "12px" } },
+    title,
+    status,
+    el("div", {}, el("div", { style: labelStyle() }, "1) OpenAI API key"), keyInput),
+    el("div", {}, el("div", { style: labelStyle() }, "2) Upload PDF"), pdfInput),
+    el("div", {}, el("div", { style: labelStyle() }, "3) Prompt (PNG → text)"), promptArea, el("div", { style: { marginTop: "8px" } }, resetPromptBtn)),
+    el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
+      el("div", {}, el("div", { style: labelStyle() }, "Vision model"), visionModelInput),
+      el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
+    ),
+    el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
+      el("div", {}, el("div", { style: labelStyle() }, "TTS model"), ttsModelInput),
+      el("div", {}, el("div", { style: labelStyle() }, "Voice"), voiceInput),
+    ),
+    el("div", {}, el("div", { style: labelStyle() }, "Optional TTS instructions"), ttsInstr),
+    el("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap" } },
+      startBtn, cancelBtn, zipTxtBtn, zipAacBtn, fullAacBtn
+    ),
+    pageTable
+  );
+
+  root.appendChild(grid);
+  document.body.appendChild(root);
+
+  // Load persisted into UI
+  keyInput.value = APP.state.apiKey;
+  promptArea.value = APP.state.prompt || APP.defaults.prompt;
+  if (!APP.state.prompt) APP.state.prompt = promptArea.value;
+  visionModelInput.value = APP.state.visionModel;
+  ttsModelInput.value = APP.state.ttsModel;
+  voiceInput.value = APP.state.voice;
+  ttsInstr.value = APP.state.ttsInstructions;
+  scaleInput.value = String(APP.state.scale);
+
+  ui.setRunning(false);
+  ui.updateGlobalButtons();
+  return ui;
+}
+
+function btnStyle(overrides = {}) {
+  return {
+    padding: "10px 12px",
+    borderRadius: "10px",
+    border: "1px solid #ccc",
+    background: "#fff",
+    cursor: "pointer",
+    ...overrides
+  };
+}
+function miniBtnStyle() {
+  return {
+    padding: "6px 10px",
+    borderRadius: "10px",
+    border: "1px solid #ccc",
+    background: "#fff",
+    cursor: "pointer"
+  };
+}
+function labelStyle() {
+  return { fontSize: "12px", color: "#444", marginBottom: "6px" };
+}
+
+// --------- Boot ---------
+loadPersisted();
+if (!APP.state.prompt) APP.state.prompt = APP.defaults.prompt;
+persist();
+
+const ui = buildUI();
+ui.setStatus("Ready. Enter key, upload PDF, edit prompt if needed, then Start.");
+
+
+</script>
+
+</body>
+</html>
