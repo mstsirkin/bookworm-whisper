@@ -52,11 +52,15 @@ const APP = {
   },
   defaults: {
     prompt:
-`look at it, remove page headers and footers, and produce the text of the page.
-if there is a footnote, find where it belongs and insert inline like this:
-FOOTNOTE: [ TEXT ] END OF FOOTNOTE .
+`look at it, remove repeating page headers and footers (but leave title in place), and note if there are footnotes and where they are referenced. then, produce the text of the page.
+if there is a footnote, find where the footnote belongs (the place where the footnote is referenced by number!) and insert inline like this:
+<insert space here>FOOTNOTE: [ TEXT ] END OF FOOTNOTE .
+To be clear: for example, if text has reference [1] and foot note stating 1. SOMETEXT at bottom of page, replace [1] with
+ FOOTNOTE: [ SOMETEXT ] END OF FOOTNOTE and completely exclude 1. SOMETEXT at the end of the file.
+
 Do not use OCR do it manually!
-return the result in field "file" in json.`
+return the result in field "file" in json.
+Do not add any additional comments besides the markup above. in particular leave any notes outside of the file field in json.`
   }
 };
 

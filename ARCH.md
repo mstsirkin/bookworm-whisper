@@ -169,14 +169,15 @@ Vision model:
 
 Default PNG → text prompt:
 
-You may use tools only to improve image quality (crop margins, deskew/rotate, denoise, increase contrast/sharpness).
-Do not use any OCR, text-extraction, PDF text layer, or “extract text” tool.
-After any cleanup, transcribe the text by visual inspection of the page image, in correct reading order.
-Remove repeating page headers and footers.
-If there is a footnote, insert it inline exactly as:
-FOOTNOTE: [ ... ] END OF FOOTNOTE
-Output JSON only with exactly:
-{ "file": "<full page text>" }
+look at it, remove repeating page headers and footers (but leave title in place), and note if there are footnotes and where they are referenced. then, produce the text of the page.
+if there is a footnote, find where the footnote belongs (the place where the footnote is referenced by number!) and insert inline like this:
+<insert space here>FOOTNOTE: [ TEXT ] END OF FOOTNOTE .
+To be clear: for example, if text has reference [1] and foot note stating 1. SOMETEXT at bottom of page, replace [1] with
+ FOOTNOTE: [ SOMETEXT ] END OF FOOTNOTE and completely exclude 1. SOMETEXT at the end of the file.
+
+Do not use OCR do it manually!
+return the result in field "file" in json.
+Do not add any additional comments besides the markup above. in particular leave any notes outside of the file field in json.
 
 This prompt is persisted locally and can be edited by the user.
 A “Reset prompt to default” button restores this block exactly.
