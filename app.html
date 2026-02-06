@@ -873,15 +873,6 @@ function buildUI() {
     oninput: (e) => { APP.state.prompt = e.target.value; persist(); }
   });
 
-  const resetPromptBtn = el("button", {
-    style: btnStyle(),
-    onclick: () => {
-      APP.state.prompt = APP.defaults.prompt;
-      promptArea.value = APP.state.prompt;
-      persist();
-    }
-  }, "Reset prompt to default");
-
   const pdfInput = el("input", {
     type: "file",
     accept: "application/pdf",
@@ -946,6 +937,30 @@ function buildUI() {
     }
   });
 
+  const resetAllSettingsBtn = el("button", {
+    style: btnStyle({ background: "#eee" }),
+    onclick: () => {
+      APP.state.prompt = APP.defaults.prompt;
+      APP.state.visionModel = "gpt-4o-mini";
+      APP.state.ttsModel = "gpt-4o-mini-tts";
+      APP.state.voice = "coral";
+      APP.state.ttsInstructions = "";
+      APP.state.scale = 1.5;
+      APP.state.maxParallel = 30;
+
+      promptArea.value = APP.state.prompt;
+      visionModelInput.value = APP.state.visionModel;
+      ttsModelInput.value = APP.state.ttsModel;
+      voiceInput.value = APP.state.voice;
+      ttsInstr.value = APP.state.ttsInstructions;
+      scaleInput.value = String(APP.state.scale);
+      parallelInput.value = String(APP.state.maxParallel);
+
+      persist();
+      ui.setStatus("Reset settings to defaults (API key kept).");
+    }
+  }, "Reset all settings");
+
   const startBtn = el("button", { style: btnStyle(), onclick: async () => {
     if (APP.state.running) return;
     await runPipeline(ui);
@@ -994,7 +1009,7 @@ function buildUI() {
       cancelBtn.disabled = !running;
       keyInput.disabled = running;
       promptArea.disabled = running;
-      resetPromptBtn.disabled = running;
+      resetAllSettingsBtn.disabled = running;
       pdfInput.disabled = running;
       visionModelInput.disabled = running;
       ttsModelInput.disabled = running;
@@ -1076,7 +1091,14 @@ function buildUI() {
     status,
     el("div", {}, el("div", { style: labelStyle() }, "1) OpenAI API key"), keyInput, keyLinks),
     el("div", {}, el("div", { style: labelStyle() }, "2) Upload PDF"), pdfInput),
-    el("div", {}, el("div", { style: labelStyle() }, "3) Prompt (PNG → text)"), promptArea, el("div", { style: { marginTop: "8px" } }, resetPromptBtn)),
+    el("div", {},
+      el("div", { style: labelStyle() }, "3) Execution settings"),
+      el("div", { style: { marginTop: "8px", display: "flex", gap: "10px", flexWrap: "wrap" } }, resetAllSettingsBtn)
+    ),
+    el("div", {},
+      el("div", { style: labelStyle() }, "Prompt (PNG → text)"),
+      promptArea
+    ),
     el("div", { style: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"10px" } },
       el("div", {}, el("div", { style: labelStyle() }, "Vision model"), visionModelInput),
       el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
@@ -1087,8 +1109,13 @@ function buildUI() {
       el("div", {}, el("div", { style: labelStyle() }, "Voice"), voiceInput),
     ),
     el("div", {}, el("div", { style: labelStyle() }, "Optional TTS instructions"), ttsInstr),
-    el("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap" } },
-      startBtn, cancelBtn, zipTxtBtn, fullTxtBtn, zipAacBtn, fullAacBtn
+    el("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" } },
+      el("div", { style: { ...labelStyle(), margin: 0, minWidth: "24px" } }, "4)"),
+      startBtn, cancelBtn
+    ),
+    el("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" } },
+      el("div", { style: { ...labelStyle(), margin: 0, minWidth: "24px" } }, "5)"),
+      zipTxtBtn, fullTxtBtn, zipAacBtn, fullAacBtn
     ),
     pageTable
   );
