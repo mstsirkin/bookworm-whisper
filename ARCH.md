@@ -258,7 +258,7 @@ The pipeline supports **parallel processing of pages** to improve throughput.
 Add a numeric input:
 
 - **Max parallel pages** (concurrency limit)
-- Default: **10**
+- Default: **30**
 - Minimum: 1
 - Maximum: user-defined (practically constrained by device memory and API limits)
 
@@ -267,7 +267,7 @@ This value controls how many pages may be simultaneously in-flight (render → v
 ### Behavior
 
 - Pages are queued in order.
-- At most **N** pages (user-selected, default 10) may run concurrently.
+- At most **N** pages (user-selected, default 30) may run concurrently.
 - As soon as one page finishes or fails, the next queued page starts.
 - Per-page UI updates independently.
 
@@ -275,7 +275,7 @@ This value controls how many pages may be simultaneously in-flight (render → v
 
 - Field appears near Start button:
 
-  “Max parallel pages: [ 10 ]”
+  “Max parallel pages: [ 30 ]”
 
 - Changing this value affects the next Start (not mid-run).
 
@@ -287,7 +287,7 @@ This value controls how many pages may be simultaneously in-flight (render → v
 
 ### Rationale
 
-- Default 10 provides good performance on modern phones/desktops.
+- Default 30 provides strong throughput on modern desktops.
 - User may reduce to 1 for low-memory devices or increase for fast desktops.
 
 
@@ -297,7 +297,7 @@ Parallelism is **adaptive**, not fixed.
 
 User selects:
 
-- Max parallel pages (default: 10, user may set higher, e.g. 30)
+- Max parallel pages (default: 30, user may set higher, e.g. 60)
 
 Internally the app maintains:
 
@@ -509,4 +509,3 @@ based on this cache.
 - Temperature support detected dynamically per model
 - Decision cached locally
 - Vision calls become self-correcting and future-proof
-
