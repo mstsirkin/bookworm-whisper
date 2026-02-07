@@ -385,10 +385,10 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
       res = await sendVision(false);
       if (!res.ok) {
         const t2 = await safeReadText(res);
-        throw new Error(`Vision failed: HTTP ${res.status} ${t2}`);
+        throw makeHttpError("Vision failed", res.status, t2);
       }
     } else {
-      throw new Error(`Vision failed: HTTP ${res.status} ${t}`);
+      throw makeHttpError("Vision failed", res.status, t);
     }
   }
 
@@ -439,7 +439,7 @@ async function openaiTtsTextToAac({ text, abortSignal }) {
 
   if (!res.ok) {
     const t = await safeReadText(res);
-    throw new Error(`TTS failed: HTTP ${res.status} ${t}`);
+    throw makeHttpError("TTS failed", res.status, t);
   }
 
   const buf = await res.arrayBuffer();
@@ -482,6 +482,13 @@ function isTemperatureUnsupportedError(status, msg) {
     s.includes("unsupported") ||
     s.includes("unknown")
   );
+}
+
+function makeHttpError(prefix, status, bodyText) {
+  const msg = `${prefix}: HTTP ${status}${bodyText ? ` ${bodyText}` : ""}`;
+  const err = new Error(msg);
+  err.httpStatus = status;
+  return err;
 }
 
 // --------- Blob helpers ---------
@@ -616,14 +623,17 @@ async function processPage(pdfDoc, i, ui) {
     if (APP.state.cancelled) throw new Error("Cancelled");
     if (p._restartPending) throw new Error("Restart requested");
 
-    // Vision
-    p.stage = "vision";
-    ui.updatePage(p);
-    const acVision = makeAbort();
-    p.aborts.push(acVision);
-    const txt = await openaiVisionImageToText({ pngBlob: png, abortSignal: acVision.signal });
+    // Vision (retry HTTP 495 until cancelled/restarted)
+    const txt = await runStageWith495Retry({
+      stageBase: "vision",
+      pageNumber: i,
+      pageState: p,
+      ui,
+      runAttempt: async (signal) => openaiVisionImageToText({ pngBlob: png, abortSignal: signal })
+    });
 
     p.txt = txt;
+    p.err = null;
     p.stage = "text_ready";
     ui.updatePage(p);
     ui.enableTxtDownload(p);
@@ -632,14 +642,17 @@ async function processPage(pdfDoc, i, ui) {
     if (APP.state.cancelled) throw new Error("Cancelled");
     if (p._restartPending) throw new Error("Restart requested");
 
-    // TTS
-    p.stage = "tts";
-    ui.updatePage(p);
-    const acTts = makeAbort();
-    p.aborts.push(acTts);
-    const aacBytes = await openaiTtsTextToAac({ text: txt, abortSignal: acTts.signal });
+    // TTS (retry HTTP 495 until cancelled/restarted)
+    const aacBytes = await runStageWith495Retry({
+      stageBase: "tts",
+      pageNumber: i,
+      pageState: p,
+      ui,
+      runAttempt: async (signal) => openaiTtsTextToAac({ text: txt, abortSignal: signal })
+    });
 
     p.aacBytes = aacBytes;
+    p.err = null;
     p.stage = "ready";
     ui.updatePage(p);
     ui.enableAacDownload(p);
@@ -668,6 +681,37 @@ async function processPage(pdfDoc, i, ui) {
     ui.updatePage(p);
     // Small breather to keep UI responsive on mobile
     await sleep(50);
+  }
+}
+
+async function runStageWith495Retry({ stageBase, pageNumber, pageState, ui, runAttempt }) {
+  let attempt = 1;
+  while (true) {
+    if (APP.state.cancelled) throw new Error("Cancelled");
+    if (pageState._restartPending) throw new Error("Restart requested");
+
+    pageState.stage = attempt > 1 ? `${stageBase}(try:${attempt})` : stageBase;
+    ui.updatePage(pageState);
+
+    const ac = makeAbort();
+    pageState.aborts.push(ac);
+    try {
+      return await runAttempt(ac.signal);
+    } catch (e) {
+      if (Number(e && e.httpStatus) === 495) {
+        const nextAttempt = attempt + 1;
+        pageState.err = String(e && e.message || e);
+        pageState.stage = `${stageBase}(try:${nextAttempt})`;
+        ui.updatePage(pageState);
+        ui.setStatus(`Page ${pageNumber} ${stageBase}(try:${nextAttempt}) after: ${pageState.err}`);
+        attempt = nextAttempt;
+        continue;
+      }
+      throw e;
+    } finally {
+      const idx = pageState.aborts.indexOf(ac);
+      if (idx !== -1) pageState.aborts.splice(idx, 1);
+    }
   }
 }
 
@@ -1360,7 +1404,11 @@ function buildUI() {
       const hasPages = APP.state.pages.length > 0;
       const allQueued = hasPages && APP.state.pages.every(p => p.stage === "queued");
       const anyInProgress = APP.state.pages.some(p =>
-        p._running || p.stage === "rendering" || p.stage === "vision" || p.stage === "text_ready" || p.stage === "tts"
+        p._running ||
+        p.stage === "rendering" ||
+        p.stage === "text_ready" ||
+        String(p.stage || "").startsWith("vision") ||
+        String(p.stage || "").startsWith("tts")
       );
       const anyFailed = APP.state.pages.some(p => p.stage === "failed");
       const allDone = hasPages && APP.state.pages.every(p =>
