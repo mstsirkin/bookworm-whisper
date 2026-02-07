@@ -42,6 +42,7 @@ const APP = {
     scale: 2,
     maxParallel: 30,
     requestStaggerSec: 1,
+    retryOnRateLimit495: true,
     settingsExpanded: false,
   },
   defaults: {
@@ -197,6 +198,9 @@ function loadPersisted() {
     if (typeof obj.requestStaggerSec === "number" && Number.isFinite(obj.requestStaggerSec)) {
       APP.state.requestStaggerSec = Math.max(0, obj.requestStaggerSec);
     }
+    if (typeof obj.retryOnRateLimit495 === "boolean") {
+      APP.state.retryOnRateLimit495 = obj.retryOnRateLimit495;
+    }
     if (typeof obj.settingsExpanded === "boolean") APP.state.settingsExpanded = obj.settingsExpanded;
   } catch {}
 }
@@ -211,6 +215,7 @@ function persist() {
     scale: APP.state.scale,
     maxParallel: APP.state.maxParallel,
     requestStaggerSec: APP.state.requestStaggerSec,
+    retryOnRateLimit495: APP.state.retryOnRateLimit495,
     settingsExpanded: APP.state.settingsExpanded,
   };
   try { localStorage.setItem(LS_KEY, JSON.stringify(obj)); } catch {}
@@ -699,6 +704,7 @@ async function runStageWith495Retry({ stageBase, pageNumber, pageState, ui, runA
       return await runAttempt(ac.signal);
     } catch (e) {
       if (Number(e && e.httpStatus) === 495) {
+        if (!APP.state.retryOnRateLimit495) throw e;
         const nextAttempt = attempt + 1;
         pageState.err = String(e && e.message || e);
         pageState.stage = `${stageBase}(try:${nextAttempt})`;
@@ -1175,6 +1181,14 @@ function buildUI() {
     }
   });
 
+  const retry495Input = el("input", {
+    type: "checkbox",
+    onchange: (e) => {
+      APP.state.retryOnRateLimit495 = !!(e.target && e.target.checked);
+      persist();
+    }
+  });
+
   const resetAllSettingsBtn = el("button", {
     style: btnStyle({ background: "#eee" }),
     onclick: () => {
@@ -1186,6 +1200,7 @@ function buildUI() {
       APP.state.scale = 2;
       APP.state.maxParallel = 30;
       APP.state.requestStaggerSec = 1;
+      APP.state.retryOnRateLimit495 = true;
 
       promptArea.value = APP.state.prompt;
       visionModelInput.value = APP.state.visionModel;
@@ -1195,6 +1210,7 @@ function buildUI() {
       scaleInput.value = String(APP.state.scale);
       parallelInput.value = String(APP.state.maxParallel);
       staggerInput.value = String(APP.state.requestStaggerSec);
+      retry495Input.checked = !!APP.state.retryOnRateLimit495;
 
       persist();
       ui.setStatus("Reset settings to defaults (API key kept).");
@@ -1221,6 +1237,10 @@ function buildUI() {
     el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
     el("div", {}, el("div", { style: labelStyle() }, "Max parallel pages (0 to start jobs manually)"), parallelInput),
     el("div", {}, el("div", { style: labelStyle() }, "Request stagger (seconds)"), staggerInput),
+    el("div", {},
+      el("div", { style: labelStyle() }, "Retry on rate limit (HTTP 495)"),
+      retry495Input
+    ),
   );
 
   const ttsSettingsGrid = el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
@@ -1487,6 +1507,7 @@ function buildUI() {
   scaleInput.value = String(APP.state.scale);
   parallelInput.value = String(APP.state.maxParallel);
   staggerInput.value = String(APP.state.requestStaggerSec);
+  retry495Input.checked = !!APP.state.retryOnRateLimit495;
 
   updateSettingsPanel({ animate: false });
   ui.setRunning(false);
