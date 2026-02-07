@@ -41,6 +41,7 @@ const APP = {
     ttsInstructions: "", // optional
     scale: 2,
     maxParallel: 30,
+    requestStaggerSec: 1,
     settingsExpanded: false,
   },
   defaults: {
@@ -88,6 +89,92 @@ function downloadBlob(blob, filename) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function abortError() {
+  try {
+    return new DOMException("Aborted", "AbortError");
+  } catch {
+    const e = new Error("Aborted");
+    e.name = "AbortError";
+    return e;
+  }
+}
+
+function sleepWithAbort(ms, abortSignal) {
+  if (!(ms > 0)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+    };
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        cleanup();
+        reject(abortError());
+        return;
+      }
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
+const REQUEST_STAGGER = {
+  nextAllowedAt: 0,
+  lock: Promise.resolve()
+};
+
+function getRequestStaggerMs() {
+  const n = Number(APP.state.requestStaggerSec);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, n) * 1000;
+}
+
+function withRequestStaggerLock(fn) {
+  const run = REQUEST_STAGGER.lock.then(fn, fn);
+  REQUEST_STAGGER.lock = run.catch(() => {});
+  return run;
+}
+
+async function waitForNextRequestSlot(abortSignal) {
+  while (true) {
+    const slotAcquired = await withRequestStaggerLock(async () => {
+      const now = Date.now();
+      const waitMs = REQUEST_STAGGER.nextAllowedAt - now;
+      if (waitMs > 0) return waitMs;
+      REQUEST_STAGGER.nextAllowedAt = now + getRequestStaggerMs();
+      return 0;
+    });
+    if (!(slotAcquired > 0)) return;
+    await sleepWithAbort(slotAcquired, abortSignal);
+  }
+}
+
+async function markRequestFinished() {
+  await withRequestStaggerLock(async () => {
+    const nextAllowed = Date.now() + getRequestStaggerMs();
+    if (nextAllowed > REQUEST_STAGGER.nextAllowedAt) {
+      REQUEST_STAGGER.nextAllowedAt = nextAllowed;
+    }
+  });
+}
+
+async function staggeredFetch(url, init = {}) {
+  const abortSignal = init ? init.signal : null;
+  await waitForNextRequestSlot(abortSignal);
+  try {
+    return await fetch(url, init);
+  } finally {
+    await markRequestFinished();
+  }
+}
+
 
 // --------- Persistence ---------
 const LS_KEY = "pdf2aac_app_v1";
@@ -107,6 +194,9 @@ function loadPersisted() {
     if (typeof obj.maxParallel === "number" && Number.isFinite(obj.maxParallel)) {
       APP.state.maxParallel = Math.max(0, Math.floor(obj.maxParallel));
     }
+    if (typeof obj.requestStaggerSec === "number" && Number.isFinite(obj.requestStaggerSec)) {
+      APP.state.requestStaggerSec = Math.max(0, obj.requestStaggerSec);
+    }
     if (typeof obj.settingsExpanded === "boolean") APP.state.settingsExpanded = obj.settingsExpanded;
   } catch {}
 }
@@ -120,6 +210,7 @@ function persist() {
     ttsInstructions: APP.state.ttsInstructions,
     scale: APP.state.scale,
     maxParallel: APP.state.maxParallel,
+    requestStaggerSec: APP.state.requestStaggerSec,
     settingsExpanded: APP.state.settingsExpanded,
   };
   try { localStorage.setItem(LS_KEY, JSON.stringify(obj)); } catch {}
@@ -275,7 +366,7 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
     return body;
   };
 
-  const sendVision = (withTemperature) => fetch("https://api.openai.com/v1/responses", {
+  const sendVision = (withTemperature) => staggeredFetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${APP.state.apiKey}`,
@@ -336,7 +427,7 @@ async function openaiTtsTextToAac({ text, abortSignal }) {
     body.instructions = APP.state.ttsInstructions.trim();
   }
 
-  const res = await fetch("https://api.openai.com/v1/audio/speech", {
+  const res = await staggeredFetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${APP.state.apiKey}`,
@@ -1029,6 +1120,17 @@ function buildUI() {
     }
   });
 
+  const staggerInput = el("input", {
+    type: "number",
+    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => {
+      const v = Number(e.target.value);
+      if (!Number.isFinite(v)) return;
+      APP.state.requestStaggerSec = Math.max(0, v);
+      persist();
+    }
+  });
+
   const resetAllSettingsBtn = el("button", {
     style: btnStyle({ background: "#eee" }),
     onclick: () => {
@@ -1039,6 +1141,7 @@ function buildUI() {
       APP.state.ttsInstructions = "";
       APP.state.scale = 2;
       APP.state.maxParallel = 30;
+      APP.state.requestStaggerSec = 1;
 
       promptArea.value = APP.state.prompt;
       visionModelInput.value = APP.state.visionModel;
@@ -1047,6 +1150,7 @@ function buildUI() {
       ttsInstr.value = APP.state.ttsInstructions;
       scaleInput.value = String(APP.state.scale);
       parallelInput.value = String(APP.state.maxParallel);
+      staggerInput.value = String(APP.state.requestStaggerSec);
 
       persist();
       ui.setStatus("Reset settings to defaults (API key kept).");
@@ -1072,6 +1176,7 @@ function buildUI() {
     el("div", {}, el("div", { style: labelStyle() }, "Vision model"), visionModelInput),
     el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
     el("div", {}, el("div", { style: labelStyle() }, "Max parallel pages (0 to start jobs manually)"), parallelInput),
+    el("div", {}, el("div", { style: labelStyle() }, "Request stagger (seconds)"), staggerInput),
   );
 
   const ttsSettingsGrid = el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
@@ -1333,6 +1438,7 @@ function buildUI() {
   ttsInstr.value = APP.state.ttsInstructions;
   scaleInput.value = String(APP.state.scale);
   parallelInput.value = String(APP.state.maxParallel);
+  staggerInput.value = String(APP.state.requestStaggerSec);
 
   updateSettingsPanel({ animate: false });
   ui.setRunning(false);
