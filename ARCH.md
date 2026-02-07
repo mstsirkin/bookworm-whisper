@@ -469,6 +469,15 @@ Expected benefit:
 - Fewer invalid-model errors.
 - Better discoverability of models available to each user key.
 
+### Scale
+should be integer by default. switch to 2
+
+### Handling 429
+- retry later
+- stargger starting connections - e.g. by 1sec
+- 429 error from openai actually tells you how long to wait
+
+
 ### Adaptive concurrency backoff on 429
 
 Possible implementation:
@@ -486,3 +495,15 @@ Expected benefit:
 
 - Better throughput under changing rate limits.
 - Fewer hard failures at high concurrency settings.
+
+#  failed job handling
+
+if some job failed show a shrug emoji not thumbs up
+add a button to restart all failed jobs
+
+#  cost estimate
+show cost - do we get it from openai?
+what about disconnects we still get charged possibly?
+maybe stress it is an estimate
+a button to reset cost counter
+show cost per page
