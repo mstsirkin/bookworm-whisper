@@ -49,7 +49,7 @@ const APP = {
   },
   defaults: {
     prompt:
-`look at it, remove repeating page headers and footers (but leave title in place), and note if there are footnotes and where they are referenced. then, produce the text of the page.
+`look at this page from a paper, taking into account that papers can use varying indent and fonts for emphasis, and remove repeating page headers and footers (but leave title in place), and note if there are footnotes and where they are referenced. IF TEXT IS HARD TO READ THINK HARD TO UNDERSTAND AND EXTRACT IT. make sure not to remove paper text! if you are in doubt whether something is a header or main text, it is better to leave it in place.  then, produce the text of the page.
 if there is a footnote, find where the footnote belongs (the place where the footnote is referenced by number!) and insert inline like this:
 <insert space here>FOOTNOTE: [ TEXT ] END OF FOOTNOTE .
 To be clear: for example, if text has reference [1] and foot note stating 1. SOMETEXT at bottom of page, replace [1] with
