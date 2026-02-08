@@ -1902,19 +1902,19 @@ function buildUI() {
 
   const zipTxtBtn = el("button", { style: btnStyle(), disabled: true, onclick: async () => {
     await zipAllTxt();
-  }}, "Download all TXT (ZIP)");
+  }}, "TXT (zip)");
 
   const zipAacBtn = el("button", { style: btnStyle(), disabled: true, onclick: async () => {
     await zipAllAac();
-  }}, "Download all AAC (ZIP)");
+  }}, "AAC (ZIP)");
 
   const fullTxtBtn = el("button", { style: btnStyle(), disabled: true, onclick: () => {
     concatAllTxt();
-  }}, "Download full concatenated TXT");
+  }}, "TXT (single file)");
 
   const fullAacBtn = el("button", { style: btnStyle(), disabled: true, onclick: () => {
     concatAllAac();
-  }}, "Download full concatenated AAC");
+  }}, "AAC (single file)");
 
   const m4bBtn = el("button", { style: btnStyle(), disabled: true, onclick: async () => {
     try {
@@ -1924,7 +1924,7 @@ function buildUI() {
     } catch (e) {
       ui.setStatus(`Error: ${String(e && e.message || e)}`);
     }
-  }}, "Download M4B (chapters)");
+  }}, "M4B");
 
   const downloadStateEmoji = el("span", {
     style: { fontSize: "18px", lineHeight: "1", display: "inline-flex", alignItems: "center" },
@@ -2107,6 +2107,7 @@ function buildUI() {
     el("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" } },
       el("div", { style: Object.assign({}, labelStyle(), { margin: 0, minWidth: "24px" }) }, "5)"),
       downloadStateEmoji,
+      el("span", { style: { fontSize: "12px", color: "#444", whiteSpace: "nowrap" } }, "Download:"),
       zipTxtBtn, fullTxtBtn, zipAacBtn, fullAacBtn, m4bBtn
     ),
     pageTable
