@@ -1168,16 +1168,50 @@ function buildUI() {
   const pdfInput = el("input", {
     type: "file",
     accept: "application/pdf",
-    style: { width: "auto", maxWidth: "100%" },
+    style: {
+      position: "absolute",
+      width: "1px",
+      height: "1px",
+      padding: 0,
+      margin: "-1px",
+      overflow: "hidden",
+      clip: "rect(0, 0, 0, 0)",
+      whiteSpace: "nowrap",
+      border: 0
+    },
     onchange: (e) => {
       const f = e.target.files && e.target.files[0];
       APP.state.pdfFile = f || null;
       const autoName = f ? stripPdfExtension(f.name) : "";
       APP.state.downloadName = autoName;
       nameInput.value = autoName;
+      setText(pdfNameText, f ? f.name : "No file selected");
+      pdfNameText.title = f ? f.name : "No file selected";
       ui.setStatus(f ? `Selected PDF: ${f.name}` : "No PDF selected.");
     }
   });
+
+  const uploadPdfBtn = el("button", {
+    type: "button",
+    style: btnStyle({ background: "#eee" }),
+    onclick: () => {
+      if (APP.state.running) return;
+      pdfInput.click();
+    }
+  }, "Upload PDF");
+
+  const pdfNameText = el("span", {
+    style: {
+      display: "inline-block",
+      maxWidth: "240px",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      fontSize: "12px",
+      color: "#444",
+      whiteSpace: "nowrap"
+    },
+    title: "No file selected"
+  }, "No file selected");
 
   const nameInput = el("input", {
     type: "text",
@@ -1436,6 +1470,7 @@ function buildUI() {
       promptArea.disabled = running;
       resetAllSettingsBtn.disabled = running;
       pdfInput.disabled = running;
+      uploadPdfBtn.disabled = running;
       nameInput.disabled = running;
       pageFromInput.disabled = running;
       pageToInput.disabled = running;
@@ -1558,14 +1593,11 @@ function buildUI() {
       keyLinks
     ),
     el("div", {},
-      el("div", { style: Object.assign({}, labelStyle(), { display: "flex", gap: "10px", alignItems: "center", marginBottom: "6px" }) },
-        el("div", { style: { minWidth: "24px", margin: 0 } }, "2)"),
-        el("div", {}, "Upload PDF")
-      ),
       el("div", { style: { marginTop: "4px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-        el("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-          pdfInput
-        ),
+        el("div", { style: Object.assign({}, labelStyle(), { margin: 0, minWidth: "24px" }) }, "2)"),
+        uploadPdfBtn,
+        pdfNameText,
+        pdfInput,
         el("div", { style: { fontSize: "12px", color: "#444", whiteSpace: "nowrap" } }, "Name"),
         el("div", { style: { width: "180px" } }, nameInput),
         el("div", { style: { fontSize: "12px", color: "#444", whiteSpace: "nowrap" } }, "From page"),
