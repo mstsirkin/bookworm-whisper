@@ -1113,7 +1113,7 @@ function buildUI() {
   const keyInput = el("input", {
     type: "password",
     placeholder: "OpenAI API key",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => { APP.state.apiKey = e.target.value; persist(); }
   });
 
@@ -1134,7 +1134,7 @@ function buildUI() {
 
   const promptArea = el("textarea", {
     rows: "8",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
     oninput: (e) => { APP.state.prompt = e.target.value; persist(); }
   });
 
@@ -1153,7 +1153,7 @@ function buildUI() {
     type: "number",
     min: "1",
     placeholder: "#",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", textAlign: "left" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", textAlign: "left" },
     oninput: (e) => { APP.state.pageRangeFrom = String(e.target.value || ""); }
   });
 
@@ -1161,35 +1161,35 @@ function buildUI() {
     type: "number",
     min: "1",
     placeholder: "#",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", textAlign: "left" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", textAlign: "left" },
     oninput: (e) => { APP.state.pageRangeTo = String(e.target.value || ""); }
   });
 
   const visionModelInput = el("input", {
     type: "text",
     placeholder: "Vision model (e.g. gpt-4o-mini)",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => { APP.state.visionModel = e.target.value; persist(); }
   });
 
   const ttsModelInput = el("input", {
     type: "text",
     placeholder: "TTS model (e.g. gpt-4o-mini-tts)",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => { APP.state.ttsModel = e.target.value; persist(); }
   });
 
   const voiceInput = el("input", {
     type: "text",
     placeholder: "Voice (e.g. coral)",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => { APP.state.voice = e.target.value; persist(); }
   });
 
   const ttsInstr = el("input", {
     type: "text",
     placeholder: "Optional TTS instructions",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => { APP.state.ttsInstructions = e.target.value; persist(); }
   });
 
@@ -1198,7 +1198,7 @@ function buildUI() {
     step: "0.1",
     min: "0.5",
     max: "3.0",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => {
       const v = Number(e.target.value);
       if (!Number.isNaN(v)) { APP.state.scale = v; persist(); }
@@ -1209,7 +1209,7 @@ function buildUI() {
     type: "number",
     step: "1",
     min: "0",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => {
       const v = Number(e.target.value);
       if (!Number.isFinite(v)) return;
@@ -1220,7 +1220,7 @@ function buildUI() {
 
   const staggerInput = el("input", {
     type: "number",
-    style: { width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => {
       const v = Number(e.target.value);
       if (!Number.isFinite(v)) return;
@@ -1280,13 +1280,15 @@ function buildUI() {
     promptArea
   );
 
+  const settingsFieldLabelStyle = () => Object.assign({}, labelStyle(), { minHeight: "34px", display: "flex", alignItems: "flex-end" });
+
   const modelSettingsGrid = el("div", { style: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"10px" } },
-    el("div", {}, el("div", { style: labelStyle() }, "Vision model"), visionModelInput),
-    el("div", {}, el("div", { style: labelStyle() }, "Scale (PDF.js)"), scaleInput),
-    el("div", {}, el("div", { style: labelStyle() }, "Max parallel pages (0 to start jobs manually)"), parallelInput),
-    el("div", {}, el("div", { style: labelStyle() }, "Request stagger (seconds)"), staggerInput),
+    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Vision model"), visionModelInput),
+    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Scale (PDF.js)"), scaleInput),
+    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Max parallel pages (0 to start jobs manually)"), parallelInput),
+    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Request stagger (seconds)"), staggerInput),
     el("div", {},
-      el("div", { style: labelStyle() }, "Retry on rate limit (HTTP 495)"),
+      el("div", { style: settingsFieldLabelStyle() }, "Retry on rate limit (HTTP 495)"),
       retry495Input
     ),
   );
