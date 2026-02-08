@@ -585,16 +585,10 @@ Known player compatibility:
 - VLC can require Nero-style `chpl`; this is now emitted when using `tref+nero-chpl`.
 - Cozy Player currently does not accept the produced M4B/M4A files (observed locally).
 
-Linux playback notes:
-
-- `mpv` chapter navigation: `PgUp` / `PgDn`, or chapter picker `g` then `c`.
-- On this mpv build, start-at-chapter CLI syntax is `mpv --start='#3' file.m4b`.
-- (quote or escape `#`, otherwise shell treats it as comment).
-
 Remaining validation:
 
 - Re-test Apple Books chapter UI/behavior on iPhone with multi-page real books.
-- Re-test chapter title display across VLC/mpv after library updates.
+- Re-test chapter title display on non-Apple players after library updates.
 
 Non-goals:
 
