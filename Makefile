@@ -27,22 +27,30 @@ update: bundle
 	@echo "Inlining bundle into $(APP_HTML)..."
 	@tmp="$$(mktemp)"; \
 	awk -v bundle="$(BUNDLE)" '\
-		BEGIN { injected = 0; skipping = 0 } \
-		/<!-- Bundled Mediabunny fork \(inline\) -->/ { skipping = 1; next } \
-		skipping && /^<\/script>$$/ { skipping = 0; next } \
-		/<!-- Libraries are loaded lazily in JS with CDN fallback\. -->/ && !injected { \
+		BEGIN { injected = 0; in_bundle = 0 } \
+		/<!-- MEDIABUNNY_BUNDLE_START -->/ && !injected { \
+			print; \
 			print "<!-- Bundled Mediabunny fork (inline) -->"; \
 			print "<script>"; \
 			while ((getline line < bundle) > 0) print line; \
 			close(bundle); \
 			print "</script>"; \
-			print ""; \
+			in_bundle = 1; \
 			injected = 1; \
+			next; \
+		} \
+		in_bundle && /<!-- MEDIABUNNY_BUNDLE_END -->/ { \
+			print; \
+			in_bundle = 0; \
+			next; \
+		} \
+		in_bundle { \
+			next; \
 		} \
 		{ print } \
 		END { \
 			if (!injected) { \
-				print "ERROR: could not find insertion marker in app.html" > "/dev/stderr"; \
+				print "ERROR: could not find MEDIABUNNY_BUNDLE_START marker in app.html" > "/dev/stderr"; \
 				exit 1; \
 			} \
 		} \
