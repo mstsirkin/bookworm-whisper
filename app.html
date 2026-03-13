@@ -627,6 +627,8 @@ const APP = {
     maxParallel: 30,
     requestStaggerSec: 1,
     retryOnRateLimit495: true,
+    keepAliveSoundVolume: 0.03,
+    keepAliveSoundIntervalSec: 15,
     settingsExpanded: false,
   },
   defaults: {
@@ -715,6 +717,244 @@ const REQUEST_STAGGER = {
   lock: Promise.resolve()
 };
 
+const KEEPALIVE_WS = {
+  url: "wss://ws.postman-echo.com/raw",
+  socket: null,
+  pingTimer: null,
+  reconnectTimer: null,
+  shouldRun: false,
+  connectAttempt: 0,
+};
+
+const KEEPALIVE_SOUND = {
+  audioContext: null,
+  tickTimer: null,
+  active: false,
+  hasPlayedWhileActive: false,
+};
+
+function clearKeepAliveTimers() {
+  if (KEEPALIVE_WS.pingTimer) {
+    clearInterval(KEEPALIVE_WS.pingTimer);
+    KEEPALIVE_WS.pingTimer = null;
+  }
+  if (KEEPALIVE_WS.reconnectTimer) {
+    clearTimeout(KEEPALIVE_WS.reconnectTimer);
+    KEEPALIVE_WS.reconnectTimer = null;
+  }
+}
+
+function clearKeepAliveSoundTimer() {
+  if (KEEPALIVE_SOUND.tickTimer) {
+    clearInterval(KEEPALIVE_SOUND.tickTimer);
+    KEEPALIVE_SOUND.tickTimer = null;
+  }
+}
+
+function getKeepAliveSoundVolume() {
+  const n = Number(APP.state.keepAliveSoundVolume);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function getKeepAliveSoundIntervalMs() {
+  const n = Number(APP.state.keepAliveSoundIntervalSec);
+  if (!Number.isFinite(n)) return 15000;
+  return Math.max(1000, n * 1000);
+}
+
+function ensureKeepAliveAudioContext() {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return null;
+  if (!KEEPALIVE_SOUND.audioContext || KEEPALIVE_SOUND.audioContext.state === "closed") {
+    KEEPALIVE_SOUND.audioContext = new AudioCtx();
+  }
+  if (KEEPALIVE_SOUND.audioContext.state === "suspended") {
+    KEEPALIVE_SOUND.audioContext.resume().catch(() => {});
+  }
+  return KEEPALIVE_SOUND.audioContext;
+}
+
+function playKeepAliveTone({ frequency, durationMs, volume, type }) {
+  if (!(volume > 0)) return;
+  const ctx = ensureKeepAliveAudioContext();
+  if (!ctx) return;
+
+  const start = ctx.currentTime;
+  const durationSec = Math.max(0.02, durationMs / 1000);
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = type || "sine";
+  osc.frequency.setValueAtTime(frequency, start);
+
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, volume), start + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + durationSec);
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  osc.start(start);
+  osc.stop(start + durationSec + 0.02);
+}
+
+function playKeepAliveTick() {
+  const volume = getKeepAliveSoundVolume();
+  if (!(volume > 0)) return;
+  playKeepAliveTone({
+    frequency: 880,
+    durationMs: 45,
+    volume,
+    type: "triangle",
+  });
+  KEEPALIVE_SOUND.hasPlayedWhileActive = true;
+}
+
+function playKeepAliveStopBeep() {
+  const volume = getKeepAliveSoundVolume();
+  if (!(volume > 0) || !KEEPALIVE_SOUND.hasPlayedWhileActive) return;
+  playKeepAliveTone({
+    frequency: 660,
+    durationMs: 110,
+    volume: Math.max(0.0001, volume * 0.8),
+    type: "sine",
+  });
+}
+
+function primeKeepAliveAudio() {
+  if (!(getKeepAliveSoundVolume() > 0)) return;
+  ensureKeepAliveAudioContext();
+}
+
+function syncKeepAliveSound() {
+  const shouldRun = KEEPALIVE_WS.shouldRun && getKeepAliveSoundVolume() > 0;
+  if (!shouldRun) {
+    if (KEEPALIVE_SOUND.active) {
+      clearKeepAliveSoundTimer();
+      KEEPALIVE_SOUND.active = false;
+      playKeepAliveStopBeep();
+      KEEPALIVE_SOUND.hasPlayedWhileActive = false;
+      return;
+    }
+    clearKeepAliveSoundTimer();
+    KEEPALIVE_SOUND.hasPlayedWhileActive = false;
+    return;
+  }
+
+  const intervalMs = getKeepAliveSoundIntervalMs();
+  if (KEEPALIVE_SOUND.active && KEEPALIVE_SOUND.tickTimer) return;
+
+  KEEPALIVE_SOUND.active = true;
+  ensureKeepAliveAudioContext();
+  playKeepAliveTick();
+  clearKeepAliveSoundTimer();
+  KEEPALIVE_SOUND.tickTimer = setInterval(() => {
+    if (!KEEPALIVE_WS.shouldRun || !(getKeepAliveSoundVolume() > 0)) {
+      syncKeepAliveSound();
+      return;
+    }
+    playKeepAliveTick();
+  }, intervalMs);
+}
+
+function scheduleKeepAliveReconnect() {
+  if (!KEEPALIVE_WS.shouldRun || KEEPALIVE_WS.reconnectTimer) return;
+  const delayMs = Math.min(30000, 1000 * Math.max(1, KEEPALIVE_WS.connectAttempt));
+  KEEPALIVE_WS.reconnectTimer = setTimeout(() => {
+    KEEPALIVE_WS.reconnectTimer = null;
+    ensureKeepAliveSocket();
+  }, delayMs);
+}
+
+function startKeepAlivePings(ws) {
+  clearKeepAliveTimers();
+  const sendPing = () => {
+    if (!KEEPALIVE_WS.shouldRun) return;
+    if (!KEEPALIVE_WS.socket || KEEPALIVE_WS.socket !== ws) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ type: "keepalive", t: Date.now() }));
+    } catch {}
+  };
+  sendPing();
+  KEEPALIVE_WS.pingTimer = setInterval(sendPing, 15000);
+}
+
+function cleanupKeepAliveSocket(ws) {
+  if (KEEPALIVE_WS.socket === ws) {
+    KEEPALIVE_WS.socket = null;
+  }
+  if (!KEEPALIVE_WS.shouldRun) {
+    clearKeepAliveTimers();
+    return;
+  }
+  scheduleKeepAliveReconnect();
+}
+
+function ensureKeepAliveSocket() {
+  if (!KEEPALIVE_WS.shouldRun) return;
+  if (KEEPALIVE_WS.socket) {
+    const state = KEEPALIVE_WS.socket.readyState;
+    if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
+  }
+
+  let ws;
+  try {
+    ws = new WebSocket(KEEPALIVE_WS.url);
+  } catch {
+    scheduleKeepAliveReconnect();
+    return;
+  }
+
+  KEEPALIVE_WS.connectAttempt += 1;
+  KEEPALIVE_WS.socket = ws;
+
+  ws.addEventListener("open", () => {
+    KEEPALIVE_WS.connectAttempt = 0;
+    startKeepAlivePings(ws);
+  });
+
+  ws.addEventListener("message", () => {});
+  ws.addEventListener("error", () => {});
+  ws.addEventListener("close", () => {
+    cleanupKeepAliveSocket(ws);
+  });
+}
+
+function hasKeepAlivePageWork() {
+  return APP.state.pages.some((p) => (
+    !!p
+    && (
+      p._running
+      || p._queued
+      || p._restartPending
+      || p.stage === "queued"
+      || p.stage === "rendering"
+      || p.stage === "text_ready"
+      || String(p.stage || "").startsWith("vision")
+      || String(p.stage || "").startsWith("tts")
+    )
+  ));
+}
+
+function syncKeepAlive() {
+  KEEPALIVE_WS.shouldRun = hasKeepAlivePageWork();
+  if (!KEEPALIVE_WS.shouldRun) {
+    clearKeepAliveTimers();
+    const ws = KEEPALIVE_WS.socket;
+    KEEPALIVE_WS.socket = null;
+    KEEPALIVE_WS.connectAttempt = 0;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      try { ws.close(1000, "idle"); } catch {}
+    }
+    syncKeepAliveSound();
+    return;
+  }
+  ensureKeepAliveSocket();
+  syncKeepAliveSound();
+}
+
 function getRequestStaggerMs() {
   const n = Number(APP.state.requestStaggerSec);
   if (!Number.isFinite(n)) return 0;
@@ -785,6 +1025,12 @@ function loadPersisted() {
     if (typeof obj.retryOnRateLimit495 === "boolean") {
       APP.state.retryOnRateLimit495 = obj.retryOnRateLimit495;
     }
+    if (typeof obj.keepAliveSoundVolume === "number" && Number.isFinite(obj.keepAliveSoundVolume)) {
+      APP.state.keepAliveSoundVolume = Math.max(0, Math.min(1, obj.keepAliveSoundVolume));
+    }
+    if (typeof obj.keepAliveSoundIntervalSec === "number" && Number.isFinite(obj.keepAliveSoundIntervalSec)) {
+      APP.state.keepAliveSoundIntervalSec = Math.max(1, obj.keepAliveSoundIntervalSec);
+    }
     if (typeof obj.settingsExpanded === "boolean") APP.state.settingsExpanded = obj.settingsExpanded;
   } catch {}
 }
@@ -800,6 +1046,8 @@ function persist() {
     maxParallel: APP.state.maxParallel,
     requestStaggerSec: APP.state.requestStaggerSec,
     retryOnRateLimit495: APP.state.retryOnRateLimit495,
+    keepAliveSoundVolume: APP.state.keepAliveSoundVolume,
+    keepAliveSoundIntervalSec: APP.state.keepAliveSoundIntervalSec,
     settingsExpanded: APP.state.settingsExpanded,
   };
   try { localStorage.setItem(LS_KEY, JSON.stringify(obj)); } catch {}
@@ -2027,6 +2275,39 @@ function buildUI() {
     }
   });
 
+  const keepAliveSoundVolumeInput = el("input", {
+    type: "range",
+    min: "0",
+    max: "0.1",
+    step: "0.005",
+    style: { width: "100%" },
+    oninput: (e) => {
+      const v = Number(e.target.value);
+      if (!Number.isFinite(v)) return;
+      APP.state.keepAliveSoundVolume = Math.max(0, Math.min(1, v));
+      persist();
+      syncKeepAliveSound();
+    }
+  });
+
+  const keepAliveSoundIntervalInput = el("input", {
+    type: "number",
+    min: "1",
+    step: "1",
+    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
+    oninput: (e) => {
+      const v = Number(e.target.value);
+      if (!Number.isFinite(v)) return;
+      APP.state.keepAliveSoundIntervalSec = Math.max(1, v);
+      persist();
+      if (KEEPALIVE_SOUND.active) {
+        clearKeepAliveSoundTimer();
+        KEEPALIVE_SOUND.active = false;
+        syncKeepAliveSound();
+      }
+    }
+  });
+
   const resetAllSettingsBtn = el("button", {
     style: btnStyle({ background: "#eee" }),
     onclick: () => {
@@ -2039,6 +2320,8 @@ function buildUI() {
       APP.state.maxParallel = 30;
       APP.state.requestStaggerSec = 1;
       APP.state.retryOnRateLimit495 = true;
+      APP.state.keepAliveSoundVolume = 0.03;
+      APP.state.keepAliveSoundIntervalSec = 15;
 
       promptArea.value = APP.state.prompt;
       visionModelInput.value = APP.state.visionModel;
@@ -2049,8 +2332,11 @@ function buildUI() {
       parallelInput.value = String(APP.state.maxParallel);
       staggerInput.value = String(APP.state.requestStaggerSec);
       retry495Input.checked = !!APP.state.retryOnRateLimit495;
+      keepAliveSoundVolumeInput.value = String(APP.state.keepAliveSoundVolume);
+      keepAliveSoundIntervalInput.value = String(APP.state.keepAliveSoundIntervalSec);
 
       persist();
+      syncKeepAliveSound();
       ui.setStatus("Reset settings to defaults (API key kept).");
     }
   }, "Reset all settings");
@@ -2081,6 +2367,8 @@ function buildUI() {
       el("div", { style: settingsFieldLabelStyle() }, "Retry on rate limit (HTTP 495)"),
       retry495Input
     ),
+    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Keepalive sound volume"), keepAliveSoundVolumeInput),
+    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Keepalive tick interval (seconds)"), keepAliveSoundIntervalInput),
   );
 
   const ttsSettingsGrid = el("div", { style: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px" } },
@@ -2131,6 +2419,7 @@ function buildUI() {
 
   const startBtn = el("button", { style: btnStyle({ background:"#eee" }), onclick: async () => {
     if (APP.state.running) return;
+    primeKeepAliveAudio();
     await runPipeline(ui);
   }}, "Start processing");
 
@@ -2140,6 +2429,7 @@ function buildUI() {
   }}, "Cancel");
 
   const restartFailedBtn = el("button", { style: btnStyle({ background:"#eee" }), disabled: true, onclick: async () => {
+    primeKeepAliveAudio();
     await restartFailedJobs(ui);
   }}, "Restart only failed jobs");
 
@@ -2193,6 +2483,7 @@ function buildUI() {
   const ui = {
     setStatus: (t) => setText(status, t),
     setRunning: (running) => {
+      syncKeepAlive();
       startBtn.disabled = running;
       cancelBtn.disabled = !running;
       keyInput.disabled = running;
@@ -2227,6 +2518,7 @@ function buildUI() {
         }
       });
       restartBtn.addEventListener("click", async () => {
+        primeKeepAliveAudio();
         await restartPage(ui, p.i);
       });
 
@@ -2259,6 +2551,7 @@ function buildUI() {
         p._ui.row.style.background = "";
       }
       p._ui.restartBtn.disabled = !!p._restartPending;
+      syncKeepAlive();
     },
     enableTxtDownload: (p) => { if (p._ui) p._ui.txtBtn.disabled = !(typeof p.txt === "string"); },
     enableAacDownload: (p) => { if (p._ui) p._ui.aacBtn.disabled = !(p.aacBytes instanceof Uint8Array); },
@@ -2371,6 +2664,8 @@ function buildUI() {
   parallelInput.value = String(APP.state.maxParallel);
   staggerInput.value = String(APP.state.requestStaggerSec);
   retry495Input.checked = !!APP.state.retryOnRateLimit495;
+  keepAliveSoundVolumeInput.value = String(APP.state.keepAliveSoundVolume);
+  keepAliveSoundIntervalInput.value = String(APP.state.keepAliveSoundIntervalSec);
   nameInput.value = APP.state.downloadName;
   pageFromInput.value = "";
   pageToInput.value = "";
