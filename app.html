@@ -616,13 +616,10 @@ const APP = {
     pageRangeFrom: "",
     pageRangeTo: "",
     // persisted
-    openaiApiKey: "",
-    mistralApiKey: "",
+    apiKey: "",
     prompt: "",
     // settings
-    visionProvider: "openai",
     visionModel: "gpt-4o-mini",
-    useMistralOcrAnnotations: false,
     ttsModel: "gpt-4o-mini-tts",
     voice: "coral",
     ttsInstructions: "", // optional
@@ -772,17 +769,9 @@ function loadPersisted() {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return;
     const obj = JSON.parse(raw);
-    if (typeof obj.openaiApiKey === "string") APP.state.openaiApiKey = obj.openaiApiKey;
-    else if (typeof obj.apiKey === "string") APP.state.openaiApiKey = obj.apiKey; // Backward compatibility.
-    if (typeof obj.mistralApiKey === "string") APP.state.mistralApiKey = obj.mistralApiKey;
+    if (typeof obj.apiKey === "string") APP.state.apiKey = obj.apiKey;
     if (typeof obj.prompt === "string") APP.state.prompt = obj.prompt;
-    if (typeof obj.visionProvider === "string" && (obj.visionProvider === "openai" || obj.visionProvider === "mistral")) {
-      APP.state.visionProvider = obj.visionProvider;
-    }
     if (typeof obj.visionModel === "string") APP.state.visionModel = obj.visionModel;
-    if (typeof obj.useMistralOcrAnnotations === "boolean") {
-      APP.state.useMistralOcrAnnotations = obj.useMistralOcrAnnotations;
-    }
     if (typeof obj.ttsModel === "string") APP.state.ttsModel = obj.ttsModel;
     if (typeof obj.voice === "string") APP.state.voice = obj.voice;
     if (typeof obj.ttsInstructions === "string") APP.state.ttsInstructions = obj.ttsInstructions;
@@ -801,12 +790,9 @@ function loadPersisted() {
 }
 function persist() {
   const obj = {
-    openaiApiKey: APP.state.openaiApiKey,
-    mistralApiKey: APP.state.mistralApiKey,
+    apiKey: APP.state.apiKey,
     prompt: APP.state.prompt,
-    visionProvider: APP.state.visionProvider,
     visionModel: APP.state.visionModel,
-    useMistralOcrAnnotations: APP.state.useMistralOcrAnnotations,
     ttsModel: APP.state.ttsModel,
     voice: APP.state.voice,
     ttsInstructions: APP.state.ttsInstructions,
@@ -922,67 +908,15 @@ async function loadPdfDocument(pdfBytes) {
   }
 }
 
-// --------- Vision + TTS API calls ---------
-function isBlank(v) {
-  return !v || !String(v).trim();
-}
-
-function mustHaveOpenAiKey() {
-  if (isBlank(APP.state.openaiApiKey)) {
-    throw new Error("Missing OpenAI API key for TTS.");
-  }
-}
-
-function mustHaveMistralKey() {
-  if (isBlank(APP.state.mistralApiKey)) {
-    throw new Error("Missing Mistral API key for vision.");
-  }
-}
-
-function getVisionProvider() {
-  return APP.state.visionProvider === "mistral" ? "mistral" : "openai";
-}
-
-function shouldUseMistralOcrAnnotations() {
-  return !!APP.state.useMistralOcrAnnotations;
-}
-
-function getMistralOcrModelId() {
-  const modelId = String(APP.state.visionModel || "").trim();
-  if (!modelId) return "mistral-ocr-latest";
-  if (/^(gpt|o\d|codex)/i.test(modelId)) return "mistral-ocr-latest";
-  return modelId;
-}
-
-function isMistralOcrModelId(modelId) {
-  const m = String(modelId || "").trim().toLowerCase();
-  return m.startsWith("mistral-ocr");
-}
-
-function normalizeVisionModelForCurrentMode() {
-  const modelId = String(APP.state.visionModel || "").trim();
-  if (shouldUseMistralOcrAnnotations()) {
-    if (!modelId || /^(gpt|o\d|codex)/i.test(modelId)) {
-      APP.state.visionModel = "mistral-ocr-latest";
-    }
-    return;
-  }
-  if (getVisionProvider() === "openai") {
-    if (!modelId || isMistralOcrModelId(modelId)) {
-      APP.state.visionModel = "gpt-4o-mini";
-    }
-  }
-}
-
-function assertPipelineKeys() {
-  mustHaveOpenAiKey();
-  if (shouldUseMistralOcrAnnotations() || getVisionProvider() === "mistral") {
-    mustHaveMistralKey();
+// --------- OpenAI calls ---------
+function mustHaveKey() {
+  if (!APP.state.apiKey || !APP.state.apiKey.trim()) {
+    throw new Error("Missing OpenAI API key.");
   }
 }
 
 async function openaiVisionImageToText({ pngBlob, abortSignal }) {
-  mustHaveOpenAiKey();
+  mustHaveKey();
 
   const dataUrl = await blobToDataURL(pngBlob); // "data:image/png;base64,..."
   const schema = {
@@ -1030,7 +964,7 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
   const sendVision = (withTemperature) => staggeredFetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${APP.state.openaiApiKey}`,
+      "Authorization": `Bearer ${APP.state.apiKey}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(makeBody(withTemperature)),
@@ -1075,201 +1009,8 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
   return parsed.file;
 }
 
-function extractMistralOutputText(respJson) {
-  try {
-    const choices = respJson && respJson.choices;
-    if (!Array.isArray(choices) || choices.length === 0) return "";
-    const message = choices[0] && choices[0].message;
-    const content = message && message.content;
-    if (typeof content === "string") return content.trim();
-    if (!Array.isArray(content)) return "";
-    let acc = "";
-    for (const part of content) {
-      if (typeof part === "string") {
-        acc += part;
-      } else if (part && typeof part.text === "string") {
-        acc += part.text;
-      }
-    }
-    return acc.trim();
-  } catch {
-    return "";
-  }
-}
-
-function isJsonModeUnsupportedError(status, msg) {
-  if (status !== 400 || !msg) return false;
-  const s = String(msg).toLowerCase();
-  return s.includes("response_format") || s.includes("json_object");
-}
-
-function extractMistralOcrAnnotatedText(respJson) {
-  const ann = respJson && respJson.document_annotation;
-  if (!ann) return "";
-  if (typeof ann === "string") return ann.trim();
-  if (typeof ann === "object") {
-    try { return JSON.stringify(ann); } catch {}
-  }
-  return "";
-}
-
-function extractMistralOcrPagesText(respJson) {
-  const pages = respJson && respJson.pages;
-  if (!Array.isArray(pages) || pages.length === 0) return "";
-  const parts = [];
-  for (const page of pages) {
-    if (page && typeof page.markdown === "string" && page.markdown.trim()) {
-      parts.push(page.markdown.trim());
-      continue;
-    }
-    if (page && typeof page.text === "string" && page.text.trim()) {
-      parts.push(page.text.trim());
-    }
-  }
-  return parts.join("\n\n").trim();
-}
-
-async function mistralVisionImageToText({ pngBlob, abortSignal }) {
-  mustHaveMistralKey();
-
-  const dataUrl = await blobToDataURL(pngBlob);
-  const modelId = APP.state.visionModel;
-  let includeJsonMode = true;
-
-  const makeBody = (withJsonMode) => {
-    const body = {
-      model: modelId,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are transcribing a document page image. You may conceptually clean/normalize the image to read it better, " +
-            "but do not use OCR/text-extraction tools. Follow the user's instructions exactly and return JSON."
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: APP.state.prompt },
-            { type: "image_url", image_url: dataUrl }
-          ]
-        }
-      ],
-      temperature: 0
-    };
-    if (withJsonMode) {
-      body.response_format = { type: "json_object" };
-    }
-    return body;
-  };
-
-  const sendVision = (withJsonMode) => staggeredFetch("https://api.mistral.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${APP.state.mistralApiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(makeBody(withJsonMode)),
-    signal: abortSignal
-  });
-
-  let res = await sendVision(includeJsonMode);
-  if (!res.ok) {
-    const t = await safeReadText(res);
-    if (includeJsonMode && isJsonModeUnsupportedError(res.status, t)) {
-      includeJsonMode = false;
-      res = await sendVision(false);
-      if (!res.ok) {
-        const t2 = await safeReadText(res);
-        throw makeHttpError("Vision failed", res.status, t2);
-      }
-    } else {
-      throw makeHttpError("Vision failed", res.status, t);
-    }
-  }
-
-  const json = await res.json();
-  const outText = extractMistralOutputText(json);
-  if (!outText) throw new Error("Vision failed: empty response text.");
-
-  let parsed;
-  try { parsed = JSON.parse(outText); } catch {
-    throw new Error("Vision failed: response was not valid JSON.");
-  }
-  if (!parsed || typeof parsed.file !== "string") throw new Error("Vision failed: JSON missing 'file'.");
-  return parsed.file;
-}
-
-async function mistralOcrImageToText({ pngBlob, abortSignal }) {
-  mustHaveMistralKey();
-
-  const dataUrl = await blobToDataURL(pngBlob);
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    properties: { file: { type: "string" } },
-    required: ["file"]
-  };
-
-  const body = {
-    model: getMistralOcrModelId(),
-    document: {
-      type: "image_url",
-      image_url: dataUrl
-    },
-    document_annotation_prompt: APP.state.prompt,
-    document_annotation_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "page_text",
-        schema
-      }
-    }
-  };
-
-  const res = await staggeredFetch("https://api.mistral.ai/v1/ocr", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${APP.state.mistralApiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body),
-    signal: abortSignal
-  });
-
-  if (!res.ok) {
-    const t = await safeReadText(res);
-    throw makeHttpError("Vision failed", res.status, t);
-  }
-
-  const json = await res.json();
-
-  const annText = extractMistralOcrAnnotatedText(json);
-  if (annText) {
-    try {
-      const parsed = JSON.parse(annText);
-      if (parsed && typeof parsed.file === "string") return parsed.file;
-    } catch {}
-    return annText;
-  }
-
-  const pagesText = extractMistralOcrPagesText(json);
-  if (pagesText) return pagesText;
-
-  throw new Error("Vision failed: empty OCR response text.");
-}
-
-async function visionImageToText({ pngBlob, abortSignal }) {
-  if (shouldUseMistralOcrAnnotations()) {
-    return mistralOcrImageToText({ pngBlob, abortSignal });
-  }
-  if (getVisionProvider() === "mistral") {
-    return mistralVisionImageToText({ pngBlob, abortSignal });
-  }
-  return openaiVisionImageToText({ pngBlob, abortSignal });
-}
-
 async function openaiTtsTextToAac({ text, abortSignal }) {
-  mustHaveOpenAiKey();
+  mustHaveKey();
 
   const body = {
     model: APP.state.ttsModel,
@@ -1284,7 +1025,7 @@ async function openaiTtsTextToAac({ text, abortSignal }) {
   const res = await staggeredFetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${APP.state.openaiApiKey}`,
+      "Authorization": `Bearer ${APP.state.apiKey}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body),
@@ -1669,7 +1410,7 @@ async function processPage(pdfDoc, i, ui) {
       pageNumber: i,
       pageState: p,
       ui,
-      runAttempt: async (signal) => visionImageToText({ pngBlob: png, abortSignal: signal })
+      runAttempt: async (signal) => openaiVisionImageToText({ pngBlob: png, abortSignal: signal })
     });
 
     p.txt = txt;
@@ -1843,8 +1584,8 @@ function resetPageForRestart(p, ui) {
 async function restartPage(ui, pageNum) {
   const p = getPageState(pageNum);
   if (!p) return;
-  try { assertPipelineKeys(); } catch (e) {
-    ui.setStatus(String(e && e.message || e));
+  if (!APP.state.apiKey) {
+    ui.setStatus("Please enter an OpenAI API key.");
     return;
   }
   if (!APP.state.pdfFile && !APP.state.pdfBytes) {
@@ -1929,8 +1670,8 @@ async function restartFailedJobs(ui) {
     ui.updateGlobalButtons();
     return;
   }
-  try { assertPipelineKeys(); } catch (e) {
-    ui.setStatus(String(e && e.message || e));
+  if (!APP.state.apiKey) {
+    ui.setStatus("Please enter an OpenAI API key.");
     return;
   }
   if (!APP.state.pdfFile && !APP.state.pdfBytes) {
@@ -2018,7 +1759,7 @@ async function runPipeline(ui) {
 
   try {
     if (!APP.state.pdfFile) throw new Error("Please upload a PDF.");
-    assertPipelineKeys();
+    if (!APP.state.apiKey) throw new Error("Please enter an OpenAI API key.");
 
     // Read PDF bytes
     ui.setStatus("Reading PDF…");
@@ -2117,9 +1858,9 @@ function buildUI() {
 
   const keyInput = el("input", {
     type: "password",
-    placeholder: "OpenAI API key (TTS)",
+    placeholder: "OpenAI API key",
     style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
-    oninput: (e) => { APP.state.openaiApiKey = e.target.value; persist(); }
+    oninput: (e) => { APP.state.apiKey = e.target.value; persist(); }
   });
 
   const keyLinks = el("div", {
@@ -2135,21 +1876,6 @@ function buildUI() {
       target: "_blank",
       rel: "noopener noreferrer"
     }, "Add to balance")
-  );
-
-  const mistralKeyLinks = el("div", {
-    style: { marginTop: "8px", fontSize: "12px", display: "flex", gap: "12px", flexWrap: "wrap" }
-  },
-    el("a", {
-      href: "https://console.mistral.ai/api-keys",
-      target: "_blank",
-      rel: "noopener noreferrer"
-    }, "Create Mistral key"),
-    el("a", {
-      href: "https://admin.mistral.ai/organization/billing",
-      target: "_blank",
-      rel: "noopener noreferrer"
-    }, "Mistral billing")
   );
 
   const promptArea = el("textarea", {
@@ -2231,50 +1957,9 @@ function buildUI() {
 
   const visionModelInput = el("input", {
     type: "text",
-    placeholder: "Vision model (e.g. gpt-4o-mini or mistral-ocr-latest)",
+    placeholder: "Vision model (e.g. gpt-4o-mini)",
     style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
     oninput: (e) => { APP.state.visionModel = e.target.value; persist(); }
-  });
-
-  const visionProviderSelect = el("select", {
-    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc", background: "#fff" },
-    onchange: (e) => {
-      APP.state.visionProvider = e.target.value === "mistral" ? "mistral" : "openai";
-      if (
-        APP.state.visionProvider === "mistral" &&
-        APP.state.useMistralOcrAnnotations &&
-        (!String(APP.state.visionModel || "").trim() || APP.state.visionModel === "gpt-4o-mini")
-      ) {
-        APP.state.visionModel = "mistral-ocr-latest";
-        visionModelInput.value = APP.state.visionModel;
-      }
-      persist();
-    }
-  },
-    el("option", { value: "openai" }, "OpenAI"),
-    el("option", { value: "mistral" }, "Mistral")
-  );
-
-  const mistralOcrToggle = el("input", {
-    type: "checkbox",
-    onchange: (e) => {
-      APP.state.useMistralOcrAnnotations = !!(e.target && e.target.checked);
-      if (
-        APP.state.useMistralOcrAnnotations &&
-        (!String(APP.state.visionModel || "").trim() || APP.state.visionModel === "gpt-4o-mini")
-      ) {
-        APP.state.visionModel = "mistral-ocr-latest";
-        visionModelInput.value = APP.state.visionModel;
-      }
-      persist();
-    }
-  });
-
-  const mistralKeyInput = el("input", {
-    type: "password",
-    placeholder: "Mistral API key (required for Mistral provider or OCR annotations)",
-    style: { width: "100%", boxSizing: "border-box", padding: "10px", borderRadius: "8px", border: "1px solid #ccc" },
-    oninput: (e) => { APP.state.mistralApiKey = e.target.value; persist(); }
   });
 
   const ttsModelInput = el("input", {
@@ -2346,9 +2031,7 @@ function buildUI() {
     style: btnStyle({ background: "#eee" }),
     onclick: () => {
       APP.state.prompt = APP.defaults.prompt;
-      APP.state.visionProvider = "openai";
       APP.state.visionModel = "gpt-4o-mini";
-      APP.state.useMistralOcrAnnotations = false;
       APP.state.ttsModel = "gpt-4o-mini-tts";
       APP.state.voice = "coral";
       APP.state.ttsInstructions = "";
@@ -2358,9 +2041,7 @@ function buildUI() {
       APP.state.retryOnRateLimit495 = true;
 
       promptArea.value = APP.state.prompt;
-      visionProviderSelect.value = APP.state.visionProvider;
       visionModelInput.value = APP.state.visionModel;
-      mistralOcrToggle.checked = !!APP.state.useMistralOcrAnnotations;
       ttsModelInput.value = APP.state.ttsModel;
       voiceInput.value = APP.state.voice;
       ttsInstr.value = APP.state.ttsInstructions;
@@ -2370,7 +2051,7 @@ function buildUI() {
       retry495Input.checked = !!APP.state.retryOnRateLimit495;
 
       persist();
-      ui.setStatus("Reset settings to defaults (API keys kept).");
+      ui.setStatus("Reset settings to defaults (API key kept).");
     }
   }, "Reset all settings");
 
@@ -2392,15 +2073,7 @@ function buildUI() {
   const settingsFieldLabelStyle = () => Object.assign({}, labelStyle(), { minHeight: "34px", display: "flex", alignItems: "flex-end" });
 
   const modelSettingsGrid = el("div", { style: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:"10px" } },
-    el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Vision provider"), visionProviderSelect),
     el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Vision model"), visionModelInput),
-    el("div", {},
-      el("div", { style: settingsFieldLabelStyle() }, "Use Mistral OCR annotations"),
-      el("div", { style: { display: "flex", alignItems: "center", gap: "8px", minHeight: "42px" } },
-        mistralOcrToggle,
-        el("span", { style: { fontSize: "12px", color: "#444" } }, "Off by default (overrides provider)")
-      )
-    ),
     el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Scale (PDF.js)"), scaleInput),
     el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Max parallel pages (0 to start jobs manually)"), parallelInput),
     el("div", {}, el("div", { style: settingsFieldLabelStyle() }, "Request stagger (seconds)"), staggerInput),
@@ -2530,10 +2203,7 @@ function buildUI() {
       nameInput.disabled = running;
       pageFromInput.disabled = running;
       pageToInput.disabled = running;
-      visionProviderSelect.disabled = running;
       visionModelInput.disabled = running;
-      mistralOcrToggle.disabled = running;
-      mistralKeyInput.disabled = running;
       ttsModelInput.disabled = running;
       voiceInput.disabled = running;
       ttsInstr.disabled = running;
@@ -2647,14 +2317,10 @@ function buildUI() {
     el("div", {},
       el("div", { style: Object.assign({}, labelStyle(), { display: "flex", gap: "10px", alignItems: "center", marginBottom: "6px" }) },
         el("div", { style: { minWidth: "24px", margin: 0 } }, "1)"),
-        el("div", {}, "API keys")
+        el("div", {}, "OpenAI API key")
       ),
-      el("div", { style: labelStyle() }, "OpenAI API key (TTS)"),
       keyInput,
-      keyLinks,
-      el("div", { style: Object.assign({}, labelStyle(), { marginTop: "10px" }) }, "Mistral API key (vision when provider = Mistral or OCR annotations are enabled)"),
-      mistralKeyInput,
-      mistralKeyLinks
+      keyLinks
     ),
     el("div", {},
       el("div", { style: { marginTop: "4px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
@@ -2694,13 +2360,10 @@ function buildUI() {
   document.body.appendChild(root);
 
   // Load persisted into UI
-  keyInput.value = APP.state.openaiApiKey;
+  keyInput.value = APP.state.apiKey;
   promptArea.value = APP.state.prompt || APP.defaults.prompt;
   if (!APP.state.prompt) APP.state.prompt = promptArea.value;
-  visionProviderSelect.value = getVisionProvider();
   visionModelInput.value = APP.state.visionModel;
-  mistralOcrToggle.checked = !!APP.state.useMistralOcrAnnotations;
-  mistralKeyInput.value = APP.state.mistralApiKey;
   ttsModelInput.value = APP.state.ttsModel;
   voiceInput.value = APP.state.voice;
   ttsInstr.value = APP.state.ttsInstructions;
@@ -2746,7 +2409,7 @@ if (!APP.state.prompt) APP.state.prompt = APP.defaults.prompt;
 persist();
 
 const ui = buildUI();
-ui.setStatus("Ready. Enter keys, upload PDF, edit prompt if needed, then Start.");
+ui.setStatus("Ready. Enter key, upload PDF, edit prompt if needed, then Start.");
 
 
 </script>
