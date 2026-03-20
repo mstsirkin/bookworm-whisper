@@ -8,10 +8,7 @@ Use online:
 - [PDF app](https://mstsirkin.github.io/bookworm-whisper/pdf.html)
 - [EPUB app](https://mstsirkin.github.io/bookworm-whisper/epub.html)
 
-Enable GitHub Pages in the repository settings with `GitHub Actions` as the source
-to publish those URLs.
-
-Source files in this repo:
+Or, download an HTML file and run locally:
 - [pdf.html](pdf.html)
 - [epub.html](epub.html)
 
