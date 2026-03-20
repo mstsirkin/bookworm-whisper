@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-APP_HTML := app.html
+APP_HTMLS := pdf.html epub.html
 VENDOR_DIR := vendor/mediabunny
 BUNDLE := $(VENDOR_DIR)/dist/bundles/mediabunny.min.cjs
 NODE_MODULES := $(VENDOR_DIR)/node_modules
@@ -12,7 +12,7 @@ help:
 	@echo "  help             Show this help (default)"
 	@echo "  init-submodules  Initialize git submodules"
 	@echo "  bundle           Build Mediabunny bundle in vendor/mediabunny"
-	@echo "  update           Rebuild bundled Mediabunny and inline it into app.html"
+	@echo "  update           Rebuild bundled Mediabunny and inline it into pdf.html and epub.html"
 
 init-submodules:
 	@echo "Initializing git submodules..."
@@ -45,35 +45,38 @@ bundle: ensure-submodule
 	@test -f "$(BUNDLE)" || { echo "Missing bundle: $(BUNDLE)" >&2; exit 1; }
 
 update: bundle
-	@echo "Inlining bundle into $(APP_HTML)..."
-	@tmp="$$(mktemp)"; \
-	awk -v bundle="$(BUNDLE)" '\
-		BEGIN { injected = 0; in_bundle = 0 } \
-		/<!-- MEDIABUNNY_BUNDLE_START -->/ && !injected { \
-			print; \
-			print "<!-- Bundled Mediabunny fork (inline) -->"; \
-			print "<script>"; \
-			while ((getline line < bundle) > 0) print line; \
-			close(bundle); \
-			print "</script>"; \
-			in_bundle = 1; \
-			injected = 1; \
-			next; \
-		} \
-		in_bundle && /<!-- MEDIABUNNY_BUNDLE_END -->/ { \
-			print; \
-			in_bundle = 0; \
-			next; \
-		} \
-		in_bundle { \
-			next; \
-		} \
-		{ print } \
-		END { \
-			if (!injected) { \
-				print "ERROR: could not find MEDIABUNNY_BUNDLE_START marker in app.html" > "/dev/stderr"; \
-				exit 1; \
+	@set -e; \
+	for app_html in $(APP_HTMLS); do \
+		echo "Inlining bundle into $$app_html..."; \
+		tmp="$$(mktemp)"; \
+		awk -v bundle="$(BUNDLE)" -v app_html="$$app_html" '\
+			BEGIN { injected = 0; in_bundle = 0 } \
+			/<!-- MEDIABUNNY_BUNDLE_START -->/ && !injected { \
+				print; \
+				print "<!-- Bundled Mediabunny fork (inline) -->"; \
+				print "<script>"; \
+				while ((getline line < bundle) > 0) print line; \
+				close(bundle); \
+				print "</script>"; \
+				in_bundle = 1; \
+				injected = 1; \
+				next; \
 			} \
-		} \
-	' "$(APP_HTML)" > "$$tmp" && mv "$$tmp" "$(APP_HTML)"
-	@echo "Updated $(APP_HTML) with $(BUNDLE)"
+			in_bundle && /<!-- MEDIABUNNY_BUNDLE_END -->/ { \
+				print; \
+				in_bundle = 0; \
+				next; \
+			} \
+			in_bundle { \
+				next; \
+			} \
+			{ print } \
+			END { \
+				if (!injected) { \
+					print "ERROR: could not find MEDIABUNNY_BUNDLE_START marker in " app_html > "/dev/stderr"; \
+					exit 1; \
+				} \
+			} \
+		' "$$app_html" > "$$tmp" && mv "$$tmp" "$$app_html"; \
+		echo "Updated $$app_html with $(BUNDLE)"; \
+	done
