@@ -1157,7 +1157,7 @@ function parseTtsTokenLimitError(status, bodyText) {
   }
 
   const match = String(apiError.message || "").match(
-    /Input of\s+([\d,]+)\s+tokens?\s+is over\s+([\d,]+)\s+tokens?/i
+    /Input of\s+([\d,]+)\s+tokens?\s+is over(?:\s+the maximum input limit of)?\s+([\d,]+)\s+tokens?/i
   );
   if (!match) return null;
 

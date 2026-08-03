@@ -75,7 +75,9 @@ Output JSON only with exactly:
   all of the following:
   - `error.type` is `invalid_request_error`
   - `error.code` is `invalid_value`
-  - `error.message` matches `Input of N tokens is over M tokens`
+  - `error.message` matches either known wording:
+    - `Input of N tokens is over M tokens`
+    - `Input of N tokens is over the maximum input limit of M tokens`
   - the parsed integers satisfy `N > M`
 - Use the server-reported `N` and `M` to estimate the required number of parts,
   with headroom for uneven boundary placement:
