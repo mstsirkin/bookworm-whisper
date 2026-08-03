@@ -1262,9 +1262,183 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
   return parsed.file;
 }
 
-async function openaiTtsTextToAac({ text, abortSignal }) {
-  mustHaveKey();
+const TTS_SPLIT_HEADROOM = 0.90;
+const TTS_SPLIT_TARGET_WINDOW_RATIO = 0.35;
 
+function parseTtsTokenLimitError(status, bodyText) {
+  if (status !== 400 || !bodyText) return null;
+
+  let payload;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+
+  const apiError = payload && payload.error;
+  if (!apiError || apiError.type !== "invalid_request_error" || apiError.code !== "invalid_value") {
+    return null;
+  }
+
+  const match = String(apiError.message || "").match(
+    /Input of\s+([\d,]+)\s+tokens?\s+is over\s+([\d,]+)\s+tokens?/i
+  );
+  if (!match) return null;
+
+  const actualTokens = Number(match[1].replace(/,/g, ""));
+  const maxTokens = Number(match[2].replace(/,/g, ""));
+  if (!Number.isSafeInteger(actualTokens) || !Number.isSafeInteger(maxTokens) || actualTokens <= maxTokens || maxTokens <= 0) {
+    return null;
+  }
+
+  return { actualTokens, maxTokens };
+}
+
+function makeTtsSegmenter(granularity) {
+  if (typeof Intl === "undefined" || typeof Intl.Segmenter !== "function") return null;
+  try {
+    return new Intl.Segmenter(undefined, { granularity });
+  } catch {
+    return null;
+  }
+}
+
+function collectTtsSplitBoundaries(text) {
+  const byPosition = new Map();
+  const add = (position, priority) => {
+    if (!Number.isInteger(position) || position <= 0 || position >= text.length) return;
+    const previous = byPosition.get(position);
+    if (previous === undefined || priority < previous) byPosition.set(position, priority);
+  };
+
+  const blankLines = [];
+  const blankLinePattern = /\r?\n[ \t]*\r?\n[ \t]*/g;
+  for (const match of text.matchAll(blankLinePattern)) {
+    blankLines.push({ start: match.index, end: match.index + match[0].length });
+  }
+
+  const sentencePositions = [];
+  const sentenceSegmenter = makeTtsSegmenter("sentence");
+  if (sentenceSegmenter) {
+    for (const segment of sentenceSegmenter.segment(text)) {
+      const position = segment.index + segment.segment.length;
+      if (position > 0 && position < text.length) sentencePositions.push(position);
+    }
+  }
+
+  for (const blankLine of blankLines) {
+    const hasSentenceBoundary = sentencePositions.some((position) => (
+      (position >= blankLine.start && position <= blankLine.end)
+      || (position < blankLine.start && /^\s*$/.test(text.slice(position, blankLine.end)))
+    ));
+    if (hasSentenceBoundary) add(blankLine.end, 0);
+  }
+
+  for (const position of sentencePositions) add(position, 1);
+
+  try {
+    const sentenceTerminalPattern = new RegExp("\\p{Sentence_Terminal}", "gu");
+    for (const match of text.matchAll(sentenceTerminalPattern)) {
+      add(match.index + match[0].length, 2);
+    }
+  } catch {
+    // Older runtimes without Unicode property escapes still have the other
+    // boundary types; do not substitute an incomplete handwritten list.
+  }
+
+  for (const blankLine of blankLines) add(blankLine.end, 3);
+
+  for (const match of text.matchAll(/\s+/gu)) {
+    add(match.index + match[0].length, 4);
+  }
+
+  const wordSegmenter = makeTtsSegmenter("word");
+  if (wordSegmenter) {
+    for (const segment of wordSegmenter.segment(text)) {
+      if (segment.isWordLike === true) {
+        add(segment.index + segment.segment.length, 5);
+      }
+    }
+  }
+
+  return Array.from(byPosition, ([position, priority]) => ({ position, priority }))
+    .sort((a, b) => a.position - b.position);
+}
+
+function splitTtsTextForReportedLimit(text, { actualTokens, maxTokens }) {
+  const safeTokenLimit = maxTokens * TTS_SPLIT_HEADROOM;
+  const partCount = Math.max(2, Math.ceil(actualTokens / safeTokenLimit));
+  const maxEstimatedChars = Math.max(1, Math.floor(text.length * safeTokenLimit / actualTokens));
+  const boundaries = collectTtsSplitBoundaries(text);
+  const parts = [];
+  let start = 0;
+
+  for (let partsRemaining = partCount; partsRemaining > 1; partsRemaining--) {
+    const remainingChars = text.length - start;
+    const targetLength = remainingChars / partsRemaining;
+    const targetPosition = start + targetLength;
+    const targetWindow = Math.max(8, targetLength * TTS_SPLIT_TARGET_WINDOW_RATIO);
+
+    // Keep this part under the observed token-density estimate and leave enough
+    // estimated capacity for every remaining part.
+    const minPosition = Math.ceil(Math.max(
+      start + 1,
+      targetPosition - targetWindow,
+      text.length - (partsRemaining - 1) * maxEstimatedChars
+    ));
+    const maxPosition = Math.floor(Math.min(
+      text.length - 1,
+      targetPosition + targetWindow,
+      start + maxEstimatedChars
+    ));
+
+    let best = null;
+    for (const boundary of boundaries) {
+      if (boundary.position < minPosition) continue;
+      if (boundary.position > maxPosition) break;
+      const distance = Math.abs(boundary.position - targetPosition);
+      if (
+        !best
+        || boundary.priority < best.priority
+        || (boundary.priority === best.priority && distance < best.distance)
+      ) {
+        best = { ...boundary, distance };
+      }
+    }
+
+    if (!best) {
+      throw new Error(
+        `No sentence, punctuation, blank-line, whitespace, or word boundary was available near part ${parts.length + 1} of ${partCount}.`
+      );
+    }
+
+    parts.push(text.slice(start, best.position));
+    start = best.position;
+  }
+
+  parts.push(text.slice(start));
+  if (
+    parts.some((part) => !part || part.length > maxEstimatedChars)
+    || parts.join("") !== text
+  ) {
+    throw new Error("The text could not be divided into safe, lossless parts without splitting a word.");
+  }
+  return parts;
+}
+
+function concatUint8Arrays(chunks) {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function requestOpenaiTtsTextToAac({ text, abortSignal }) {
   const body = {
     model: APP.state.ttsModel,
     voice: APP.state.voice,
@@ -1287,11 +1461,44 @@ async function openaiTtsTextToAac({ text, abortSignal }) {
 
   if (!res.ok) {
     const t = await safeReadText(res);
-    throw makeHttpError("TTS failed", res.status, t);
+    const err = makeHttpError("TTS failed", res.status, t);
+    const tokenLimit = parseTtsTokenLimitError(res.status, t);
+    if (tokenLimit) err.ttsTokenLimit = tokenLimit;
+    throw err;
   }
 
   const buf = await res.arrayBuffer();
   return new Uint8Array(buf);
+}
+
+async function synthesizeTtsWithOverflowFallback({ text, abortSignal }) {
+  try {
+    return await requestOpenaiTtsTextToAac({ text, abortSignal });
+  } catch (e) {
+    if (!e || !e.ttsTokenLimit) throw e;
+
+    let parts;
+    try {
+      parts = splitTtsTextForReportedLimit(text, e.ttsTokenLimit);
+    } catch (splitError) {
+      const err = new Error(
+        `${String(e.message || e)} Automatic splitting stopped: ${String(splitError && splitError.message || splitError)}`
+      );
+      err.httpStatus = e.httpStatus;
+      throw err;
+    }
+
+    const outputs = [];
+    for (const part of parts) {
+      outputs.push(await synthesizeTtsWithOverflowFallback({ text: part, abortSignal }));
+    }
+    return concatUint8Arrays(outputs);
+  }
+}
+
+async function openaiTtsTextToAac({ text, abortSignal }) {
+  mustHaveKey();
+  return synthesizeTtsWithOverflowFallback({ text, abortSignal });
 }
 
 // --------- Responses JSON helpers ---------

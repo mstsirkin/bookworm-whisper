@@ -67,6 +67,45 @@ Output JSON only with exactly:
 - response_format: "aac"
 - One AAC per page
 
+### Oversized-input fallback (implemented in PDF and EPUB apps)
+
+- Normally send the complete page/section text to TTS unchanged in one request.
+  Do not pre-split text based on a local character/token estimate.
+- Activate splitting only when TTS returns HTTP `400` with a JSON error matching
+  all of the following:
+  - `error.type` is `invalid_request_error`
+  - `error.code` is `invalid_value`
+  - `error.message` matches `Input of N tokens is over M tokens`
+  - the parsed integers satisfy `N > M`
+- Use the server-reported `N` and `M` to estimate the required number of parts,
+  with headroom for uneven boundary placement:
+
+  `parts = ceil(N / (M * 0.90))`
+
+- Split into roughly balanced parts near the calculated target positions. A
+  candidate boundary must also fall within a reasonable target window so that a
+  semantically ideal but distant boundary cannot leave an oversized or badly
+  unbalanced part.
+- Boundary preference, from highest to lowest:
+  1. sentence boundary that coincides with a blank line
+  2. sentence boundary
+  3. Unicode sentence-ending punctuation
+  4. blank line
+  5. whitespace boundary
+  6. locale-aware word boundary
+- Use `Intl.Segmenter` for sentence and word boundaries. It handles languages
+  that do not normally put whitespace between words. Use Unicode-aware
+  sentence-terminal classification for the punctuation fallback.
+- Never fall back to an arbitrary character or grapheme split in the middle of
+  a word. If no suitable boundary can produce safe chunks, fail the page/section
+  and show the error to the user.
+- Send fallback parts sequentially, preserve every input character exactly once,
+  and concatenate the returned AAC byte streams in the original order.
+- If an individual fallback part receives the same specific oversized-input
+  error, recursively apply this policy only to that part using its newly
+  reported token count. Other HTTP `400` errors are not splitting signals and
+  follow normal error handling.
+
 ## 6. ZIP bundling
 
 JSZip:
