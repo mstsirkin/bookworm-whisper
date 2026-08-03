@@ -243,7 +243,7 @@ UX summary:
 
 Vision model:
 
-- `gpt-4o-mini` (current default in `app.html`)
+- `gpt-4o-mini` (current default in `pdf.html`)
 
 Default PNG → text prompt:
 
@@ -301,7 +301,8 @@ python3 -m http.server
 Then open:
 
 ```
-http://localhost:8000/app.html
+http://localhost:8000/pdf.html
+http://localhost:8000/epub.html
 ```
 
 No build step.
@@ -396,7 +397,7 @@ This value controls how many pages may be simultaneously in-flight (render → v
 
 ## 19. Rate-limit resilience (current behavior)
 
-Current status in `app.html`:
+Current status in `pdf.html` and `epub.html`:
 
 - Scheduler uses user-selected fixed concurrency (`maxParallel`).
 - Global request staggering is implemented via `requestStaggerSec` (default `1`).
