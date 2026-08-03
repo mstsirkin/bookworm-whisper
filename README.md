@@ -5,8 +5,8 @@ A serverless frontend for turning PDFs and EPUBs into audiobooks.
 Runs entirely in the browser from a pair of standalone HTML files.
 
 Use online:
-- [PDF app](https://mstsirkin.github.io/bookworm-whisper/latest.html#pdf)
-- [EPUB app](https://mstsirkin.github.io/bookworm-whisper/latest.html#epub)
+- [PDF app](https://mstsirkin.github.io/bookworm-whisper/latest.html?bootstrap=1#pdf)
+- [EPUB app](https://mstsirkin.github.io/bookworm-whisper/latest.html?bootstrap=1#epub)
 
 Or, download an HTML file and run locally:
 - [pdf.html](pdf.html)

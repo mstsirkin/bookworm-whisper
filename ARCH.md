@@ -639,8 +639,9 @@ Non-goals:
 
 ## 24. Cache-busting launcher and refresh controls
 
-- Online links in `README.md` go through `latest.html#pdf` or
-  `latest.html#epub`.
+- Online links in `README.md` go through `latest.html?bootstrap=1#pdf` or
+  `latest.html?bootstrap=1#epub`. The one-time query avoids a cached `404` from
+  requests made before the launcher's first deployment completed.
 - The launcher maps the hash to the corresponding app and redirects to its HTML
   file with the current timestamp as a query value.
 - A cached launcher remains useful because its static JavaScript generates a
