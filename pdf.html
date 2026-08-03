@@ -666,6 +666,14 @@ function setText(node, text) {
   node.textContent = text;
 }
 
+function loadLatestApp() {
+  const url = new URL(window.location.href);
+  url.hash = "";
+  url.search = "";
+  url.searchParams.set("refresh", String(Date.now()));
+  window.location.replace(url.href);
+}
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = el("a", { href: url, download: filename });
@@ -2388,7 +2396,25 @@ function buildUI() {
     lineHeight: "1.35"
   }});
 
-  const title = el("h2", {}, "PDF Whisper: Speak Low If You Speak");
+  const title = el("h2", { style: { margin: 0 } }, "PDF Whisper: Speak Low If You Speak");
+  const refreshBtn = el("button", {
+    type: "button",
+    title: "Load latest version",
+    "aria-label": "Load latest version",
+    style: {
+      border: "0",
+      background: "transparent",
+      padding: "4px",
+      fontSize: "20px",
+      lineHeight: "1",
+      flexShrink: "0",
+      cursor: "pointer"
+    },
+    onclick: loadLatestApp
+  }, "🔄");
+  const titleRow = el("div", {
+    style: { display: "flex", alignItems: "center", gap: "6px", margin: "0.83em 0" }
+  }, title, refreshBtn);
 
   const status = el("div", { style: { margin: "8px 0", padding: "8px 10px", background: "#f5f5f5", borderRadius: "8px" }}, "Idle.");
 
@@ -2920,7 +2946,7 @@ function buildUI() {
 
   // Layout
   const grid = el("div", { style: { display: "grid", gridTemplateColumns: "1fr", gap: "12px" } },
-    title,
+    titleRow,
     status,
     el("div", {},
       el("div", { style: Object.assign({}, labelStyle(), { display: "flex", gap: "10px", alignItems: "center", marginBottom: "6px" }) },

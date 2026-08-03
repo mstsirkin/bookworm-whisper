@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load latest Bookworm Whisper</title>
+</head>
+<body>
+<p id="status">Loading the latest app…</p>
+<p>
+  <a href="pdf.html">Open the PDF app</a>
+  ·
+  <a href="epub.html">Open the EPUB app</a>
+</p>
+
+<script>
+(() => {
+  const appByHash = {
+    "#pdf": "pdf.html",
+    "#epub": "epub.html"
+  };
+  const appFile = appByHash[window.location.hash];
+  if (!appFile) {
+    document.getElementById("status").textContent = "Choose an app:";
+    return;
+  }
+
+  const url = new URL(appFile, window.location.href);
+  url.searchParams.set("refresh", String(Date.now()));
+  window.location.replace(url.href);
+})();
+</script>
+</body>
+</html>
