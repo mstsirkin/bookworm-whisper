@@ -1256,7 +1256,13 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
   if (!outText) throw new Error("Vision failed: empty response text.");
   let parsed;
   try { parsed = JSON.parse(outText); } catch (e) {
-    throw new Error(formatInvalidVisionJsonError(outText, e));
+    const parseMessage = String(e && e.message || e);
+    const err = new Error(
+      `Vision failed: response was not valid JSON (${parseMessage}). ` +
+      `Response text: ${outText.length.toLocaleString()} characters.`
+    );
+    err.pageDiagnostic = formatInvalidVisionJsonExcerpt(outText);
+    throw err;
   }
   if (!parsed || typeof parsed.file !== "string") throw new Error("Vision failed: JSON missing 'file'.");
   return parsed.file;
@@ -1264,7 +1270,7 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
 
 const INVALID_VISION_JSON_EXCERPT_LIMIT = 50000;
 
-function formatInvalidVisionJsonError(outText, parseError) {
+function formatInvalidVisionJsonExcerpt(outText) {
   let excerpt = outText;
   if (outText.length > INVALID_VISION_JSON_EXCERPT_LIMIT) {
     const headLength = Math.floor(INVALID_VISION_JSON_EXCERPT_LIMIT * 0.7);
@@ -1275,12 +1281,7 @@ function formatInvalidVisionJsonError(outText, parseError) {
       `\n\n[... ${omittedLength.toLocaleString()} characters omitted ...]\n\n` +
       outText.slice(-tailLength);
   }
-
-  const parseMessage = String(parseError && parseError.message || parseError);
-  return (
-    `Vision failed: response was not valid JSON (${parseMessage}). ` +
-    `Response text (${outText.length.toLocaleString()} characters):\n${excerpt}`
-  );
+  return excerpt;
 }
 
 const TTS_SPLIT_HEADROOM = 0.90;
@@ -1923,6 +1924,7 @@ async function processPage(pdfDoc, i, ui) {
     // Render
     p.stage = "rendering";
     p.err = null;
+    p.diagnostic = null;
     ui.updatePage(p);
 
     const acRender = makeAbort();
@@ -1943,6 +1945,7 @@ async function processPage(pdfDoc, i, ui) {
 
     p.txt = txt;
     p.err = null;
+    p.diagnostic = null;
     p.stage = "text_ready";
     ui.updatePage(p);
     ui.enableTxtDownload(p);
@@ -1962,6 +1965,7 @@ async function processPage(pdfDoc, i, ui) {
 
     p.aacBytes = aacBytes;
     p.err = null;
+    p.diagnostic = null;
     p.stage = "ready";
     ui.updatePage(p);
     ui.enableAacDownload(p);
@@ -1973,9 +1977,11 @@ async function processPage(pdfDoc, i, ui) {
     } else if (p._restartPending || msg.includes("restart requested")) {
       p.stage = "queued";
       p.err = null;
+      p.diagnostic = null;
     } else {
       p.stage = "failed";
       p.err = String(e && e.message || e);
+      p.diagnostic = e && typeof e.pageDiagnostic === "string" ? e.pageDiagnostic : null;
     }
     ui.updatePage(p);
     ui.updateGlobalButtons();
@@ -2102,6 +2108,7 @@ function resetPageForRestart(p, ui) {
   p.txt = null;
   p.aacBytes = null;
   p.err = null;
+  p.diagnostic = null;
   p.stage = "queued";
   ui.enableTxtDownload(p);
   ui.enableAacDownload(p);
@@ -2309,6 +2316,7 @@ async function runPipeline(ui) {
         txt: null,
         aacBytes: null,
         err: null,
+        diagnostic: null,
         aborts: [],
         _running: false,
         _queued: false,
@@ -2824,6 +2832,12 @@ function buildUI() {
 
       const stageSpan = el("span", {}, p.stage);
       const errSpan = el("div", { style: { color: "#b00020", whiteSpace: "pre-wrap" } }, "");
+      const diagnosticField = el("input", {
+        type: "hidden",
+        "data-page-diagnostic": String(p.i),
+        value: ""
+      });
+      const errorContainer = el("div", {}, errSpan, diagnosticField);
 
       const row = el("tr", {},
         tdNode(el("span", {}, String(p.i))),
@@ -2831,16 +2845,17 @@ function buildUI() {
         tdNode(txtBtn),
         tdNode(aacBtn),
         tdNode(restartBtn),
-        tdNode(errSpan)
+        tdNode(errorContainer)
       );
 
-      p._ui = { row, stageSpan, txtBtn, aacBtn, restartBtn, errSpan };
+      p._ui = { row, stageSpan, txtBtn, aacBtn, restartBtn, errSpan, diagnosticField };
       tbody.appendChild(row);
     },
     updatePage: (p) => {
       if (!p._ui) return;
       setText(p._ui.stageSpan, p.stage);
       setText(p._ui.errSpan, p.err ? p.err : "");
+      p._ui.diagnosticField.setAttribute("value", p.diagnostic ? p.diagnostic : "");
       if (p.stage === "failed") {
         p._ui.row.style.background = "#fff5f5";
       } else if (p.stage === "ready") {
