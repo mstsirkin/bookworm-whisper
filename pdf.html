@@ -1256,10 +1256,31 @@ async function openaiVisionImageToText({ pngBlob, abortSignal }) {
   if (!outText) throw new Error("Vision failed: empty response text.");
   let parsed;
   try { parsed = JSON.parse(outText); } catch (e) {
-    throw new Error("Vision failed: response was not valid JSON.");
+    throw new Error(formatInvalidVisionJsonError(outText, e));
   }
   if (!parsed || typeof parsed.file !== "string") throw new Error("Vision failed: JSON missing 'file'.");
   return parsed.file;
+}
+
+const INVALID_VISION_JSON_EXCERPT_LIMIT = 50000;
+
+function formatInvalidVisionJsonError(outText, parseError) {
+  let excerpt = outText;
+  if (outText.length > INVALID_VISION_JSON_EXCERPT_LIMIT) {
+    const headLength = Math.floor(INVALID_VISION_JSON_EXCERPT_LIMIT * 0.7);
+    const tailLength = INVALID_VISION_JSON_EXCERPT_LIMIT - headLength;
+    const omittedLength = outText.length - headLength - tailLength;
+    excerpt =
+      outText.slice(0, headLength) +
+      `\n\n[... ${omittedLength.toLocaleString()} characters omitted ...]\n\n` +
+      outText.slice(-tailLength);
+  }
+
+  const parseMessage = String(parseError && parseError.message || parseError);
+  return (
+    `Vision failed: response was not valid JSON (${parseMessage}). ` +
+    `Response text (${outText.length.toLocaleString()} characters):\n${excerpt}`
+  );
 }
 
 const TTS_SPLIT_HEADROOM = 0.90;
