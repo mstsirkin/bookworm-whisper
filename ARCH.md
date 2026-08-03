@@ -647,9 +647,9 @@ Non-goals:
 - A cached launcher remains useful because its static JavaScript generates a
   URL that has not been cached before; no release-number file or version-bump
   workflow is needed.
-- Both apps also place a `🔄` button immediately to the right of the title.
+- Both apps also place a monochrome `↻` link to the right of the title.
   Its tooltip and accessible label are `Load latest version`.
-- The button replaces the current query with a fresh timestamp and reloads the
+- The link replaces the current query with a fresh timestamp and reloads the
   same app, covering bookmarks and direct visits that bypass the launcher.
 - Cache-busting does not delete older HTTP cache entries or clear
   `localStorage`, so persisted settings remain. Reloading still loses in-memory

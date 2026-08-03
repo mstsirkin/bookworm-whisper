@@ -653,14 +653,6 @@ function setText(node, text) {
   node.textContent = text;
 }
 
-function loadLatestApp() {
-  const url = new URL(window.location.href);
-  url.hash = "";
-  url.search = "";
-  url.searchParams.set("refresh", String(Date.now()));
-  window.location.replace(url.href);
-}
-
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = el("a", { href: url, download: filename });
@@ -2292,24 +2284,25 @@ function buildUI() {
   }});
 
   const title = el("h2", { style: { margin: 0 } }, "EPUB Whisper for bookworms: Speak Low If You Speak");
-  const refreshBtn = el("button", {
-    type: "button",
+  const refreshUrl = new URL(window.location.href);
+  refreshUrl.hash = "";
+  refreshUrl.search = "";
+  refreshUrl.searchParams.set("refresh", String(Date.now()));
+  const refreshLink = el("a", {
+    href: refreshUrl.href,
     title: "Load latest version",
     "aria-label": "Load latest version",
     style: {
-      border: "0",
-      background: "transparent",
-      padding: "4px",
-      fontSize: "20px",
+      color: "#666",
+      textDecoration: "none",
+      fontSize: "22px",
       lineHeight: "1",
-      flexShrink: "0",
-      cursor: "pointer"
-    },
-    onclick: loadLatestApp
-  }, "🔄");
+      flexShrink: "0"
+    }
+  }, "↻");
   const titleRow = el("div", {
-    style: { display: "flex", alignItems: "center", gap: "6px", margin: "0.83em 0" }
-  }, title, refreshBtn);
+    style: { display: "flex", alignItems: "center", gap: "12px", margin: "0.83em 0" }
+  }, title, refreshLink);
 
   const status = el("div", { style: { margin: "8px 0", padding: "8px 10px", background: "#f5f5f5", borderRadius: "8px" }}, "Idle.");
 
